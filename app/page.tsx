@@ -497,23 +497,41 @@ export default function Home() {
 
       {/* Activity Feed */}
       <div className="mt-10 mb-20">
-        <h2 className="text-sm font-black text-gray-400 uppercase tracking-widest mb-4">Recent Activity</h2>
+        <h2 className="text-sm font-black text-gray-400 uppercase tracking-widest mb-4">
+          {search ? `Activity for "${search}"` : 'Recent Activity'}
+        </h2>
         <div className="bg-white border rounded-2xl overflow-hidden shadow-sm">
-          {transactions.length === 0 && <p className="p-8 text-center text-gray-400 text-sm italic">No recent transactions.</p>}
-          {transactions.map((t: any) => {
-            const itemRef = Array.isArray(t.items) ? t.items[0] : t.items;
-            return (
-              <div key={t.id} className="text-sm p-4 border-b last:border-0 flex justify-between items-center hover:bg-gray-50">
-                <div className="flex flex-col">
-                  <span className="font-bold text-gray-700">{itemRef?.name || 'Unknown Item'}</span>
-                  <span className="text-[10px] text-gray-400">{new Date(t.created_at).toLocaleString()}</span>
+          {/* Filter transactions based on the search box */}
+          {transactions
+            .filter((t: any) => {
+              const itemRef = Array.isArray(t.items) ? t.items[0] : t.items;
+              // If there is no search, show all. If there is, match item name.
+              return !search || itemRef?.name?.toLowerCase().includes(search.toLowerCase());
+            })
+            .length === 0 && (
+              <p className="p-8 text-center text-gray-400 text-sm italic">No matching transactions.</p>
+            )}
+
+          {/* Map through the FILTERED list */}
+          {transactions
+            .filter((t: any) => {
+              const itemRef = Array.isArray(t.items) ? t.items[0] : t.items;
+              return !search || itemRef?.name?.toLowerCase().includes(search.toLowerCase());
+            })
+            .map((t: any) => {
+              const itemRef = Array.isArray(t.items) ? t.items[0] : t.items;
+              return (
+                <div key={t.id} className="text-sm p-4 border-b last:border-0 flex justify-between items-center hover:bg-gray-50">
+                  <div className="flex flex-col">
+                    <span className="font-bold text-gray-700">{itemRef?.name || 'Unknown Item'}</span>
+                    <span className="text-[10px] text-gray-400">{new Date(t.created_at).toLocaleString()}</span>
+                  </div>
+                  <span className={`font-black px-3 py-1 rounded-full text-[10px] ${t.type === 'in' ? 'bg-green-100 text-green-700' : t.type === 'adjustment' ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`}>
+                    {t.type.toUpperCase()} {t.qty > 0 ? `+${t.qty}` : t.qty}
+                  </span>
                 </div>
-                <span className={`font-black px-3 py-1 rounded-full text-[10px] ${t.type === 'in' ? 'bg-green-100 text-green-700' : t.type === 'adjustment' ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`}>
-                  {t.type.toUpperCase()} {t.qty > 0 ? `+${t.qty}` : t.qty}
-                </span>
-              </div>
-            );
-          })}
+              );
+            })}
         </div>
       </div>
     </div>
