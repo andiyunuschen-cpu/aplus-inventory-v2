@@ -66,50 +66,55 @@ export default function Home() {
   }
 
  async function checkUser() {
-    try {
-      const { data: { user }, error: authError } = await supabase.auth.getUser()
-      if (authError || !user) {
-        setUser(null); setLoading(false); return;
-      }
-      setUser(user)
-
-      // 1. Get profile data including the restaurant link
-      const { data: prof } = await supabase
-        .from('profiles')
-        .select('*, restaurants(name)')
-        .eq('id', user.id)
-        .single()
-      
-      setProfile(prof)
-
-      // 2. Filter Divisions based on the schema link (Divisions.restaurant_id)
-      let divQuery = supabase
-        .from('divisions')
-        .select(`id, name, restaurant_id, restaurants!inner ( name )`)
-      
-      // STAFF LOCK: If role is not super-admin, force filter by their restaurant_id
-      if (prof?.role !== 'super-admin' && prof?.restaurant_id) {
-        divQuery = divQuery.eq('restaurant_id', prof.restaurant_id)
-      }
-
-      const { data: divs } = await divQuery
-      const availableDivs = divs || []
-      setAllDivisions(availableDivs)
-      
-      // 3. UI Logic: Staff starts on their first division, Admin starts on "All"
-      if (prof?.role !== 'super-admin' && availableDivs.length > 0) {
-        setSelectedDivision(availableDivs[0].id)
-      } else {
-        setSelectedDivision('all')
-      }
-      
-    } catch (err) {
-      console.error("System Error:", err)
-    } finally {
-      setLoading(false)
+  try {
+    const { data: { user }, error: authError } = await supabase.auth.getUser()
+    if (authError || !user) {
+      setUser(null); setLoading(false); return;
     }
-  }
+    setUser(user)
 
+    const { data: prof } = await supabase
+      .from('profiles')
+      .select('*, restaurants(name)')
+      .eq('id', user.id)
+      .single()
+    
+    setProfile(prof)
+
+    // --- CORRECTION STARTS HERE ---
+    let divQuery = supabase
+      .from('divisions')
+      .select(`id, name, restaurant_id, restaurants!inner ( name )`)
+    
+    // 1. If user is restricted to ONE division, lock it here immediately
+    if (prof?.division_id) {
+      divQuery = divQuery.eq('id', prof.division_id)
+    } 
+    // 2. Otherwise, if they are staff but not restricted to a division, lock to restaurant
+    else if (prof?.role !== 'super-admin' && prof?.restaurant_id) {
+      divQuery = divQuery.eq('restaurant_id', prof.restaurant_id)
+    }
+
+    const { data: divs } = await divQuery
+    const availableDivs = divs || []
+    setAllDivisions(availableDivs)
+    
+    // 3. UI Logic: If they have exactly 1 division available, select it.
+    if (availableDivs.length === 1) {
+      setSelectedDivision(availableDivs[0].id)
+    } else if (prof?.role !== 'super-admin' && availableDivs.length > 0) {
+      setSelectedDivision(availableDivs[0].id)
+    } else {
+      setSelectedDivision('all')
+    }
+    // --- CORRECTION ENDS HERE ---
+    
+  } catch (err) {
+    console.error("System Error:", err)
+  } finally {
+    setLoading(false)
+  }
+}
     async function fetchItems() {
     // 1. Safety Gate: Don't run if profile or divisions aren't loaded yet
     if (!profile || (profile.role !== 'super-admin' && allDivisions.length === 0)) {
