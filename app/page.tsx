@@ -240,65 +240,90 @@ export default function Home() {
     }
   }
 
-  async function exportReport() {
-    if (!month) return alert('Select month first');
-    setLoading(true);
+ async function exportReport() {
+  if (!month) return alert('Select month first');
+  setLoading(true);
 
-    try {
-      const [yearStr, monthStr] = month.split('-');
-      const year = parseInt(yearStr);
-      const monthIdx = parseInt(monthStr) - 1;
-      const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
-      
-      const workbook = new ExcelJS.Workbook();
-      const worksheet = workbook.addWorksheet('Monthly Inventory');
+  try {
+    const [yearStr, monthStr] = month.split('-');
+    const year = parseInt(yearStr);
+    const monthIdx = parseInt(monthStr) - 1;
+    const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
+    
+    const workbook = new ExcelJS.Workbook();
+    
+    // --- TAB 1: MONTHLY INVENTORY ---
+    const worksheet = workbook.addWorksheet('Monthly Inventory');
 
-      const { data: transData } = await supabase
-        .from('transactions')
-        .select('qty, type, created_at, item_id')
-        .gte('created_at', `${month}-01`)
-        .lt('created_at', monthIdx === 11 ? `${year + 1}-01-01` : `${year}-${String(monthIdx + 2).padStart(2, '0')}-01`);
+    const { data: transData } = await supabase
+      .from('transactions')
+      .select('qty, type, created_at, item_id, items!inner(name, division_id)')
+      .gte('created_at', `${month}-01`)
+      .lt('created_at', monthIdx === 11 ? `${year + 1}-01-01` : `${year}-${String(monthIdx + 2).padStart(2, '0')}-01`);
 
-      const currentDiv = allDivisions.find(d => d.id === selectedDivision);
-      const currentDivName = currentDiv 
-        ? `${currentDiv.restaurants?.name || 'Branch'} - ${currentDiv.name}` 
-        : 'All Authorized Branches';
-      
-      worksheet.addRow([`INVENTORY REPORT: ${currentDivName} (${month})`]);
-      worksheet.mergeCells(1, 1, 1, 6);
-      worksheet.getRow(1).font = { bold: true, size: 14 };
+    const currentDiv = allDivisions.find(d => d.id === selectedDivision);
+    const currentDivName = currentDiv 
+      ? `${currentDiv.restaurants?.name || 'Branch'} - ${currentDiv.name}` 
+      : 'All Authorized Branches';
+    
+    worksheet.addRow([`INVENTORY REPORT: ${currentDivName} (${month})`]);
+    worksheet.mergeCells(1, 1, 1, 6);
+    worksheet.getRow(1).font = { bold: true, size: 14 };
 
-      const headerRow2 = ['Number', 'Item Name', 'Restaurant', 'Division', 'Initial', 'Final'];
-      const headerRow3 = ['', '', '', '', '', ''];
+    const headerRow2 = ['Number', 'Item Name', 'Restaurant', 'Division', 'Initial', 'Final'];
+    const headerRow3 = ['', '', '', '', '', ''];
 
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateLabel = `${String(d).padStart(2, '0')}-${new Date(year, monthIdx).toLocaleString('en-us', { month: 'short' })}`;
+      headerRow2.push(dateLabel, ''); 
+      headerRow3.push('In', 'Out');
+    }
+
+    worksheet.addRow(headerRow2);
+    worksheet.addRow(headerRow3);
+
+    items.forEach((item, index) => {
+      const rowData = [
+        index + 1, 
+        item.name, 
+        item.divisions?.restaurants?.name || '-', 
+        item.divisions?.name, 
+        item.stock, 
+        item.stock
+      ];
       for (let d = 1; d <= daysInMonth; d++) {
-        const dateLabel = `${String(d).padStart(2, '0')}-${new Date(year, monthIdx).toLocaleString('en-us', { month: 'short' })}`;
-        headerRow2.push(dateLabel, ''); 
-        headerRow3.push('In', 'Out');
+        const dayIn = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'in' || (t.type === 'adjustment' && t.qty > 0))).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
+        const dayOut = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'out' || (t.type === 'adjustment' && t.qty < 0))).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
+        rowData.push(dayIn, dayOut);
       }
+      worksheet.addRow(rowData);
+    });
 
-      worksheet.addRow(headerRow2);
-      worksheet.addRow(headerRow3);
+    // --- TAB 2: ADJUSTMENT LOGS ---
+    const adjSheet = workbook.addWorksheet('Adjustment History');
+    adjSheet.addRow([`ADJUSTMENT LOG: ${currentDivName} (${month})`]);
+    adjSheet.mergeCells(1, 1, 1, 4);
+    adjSheet.getRow(1).font = { bold: true, size: 14 };
 
-      items.forEach((item, index) => {
-        const rowData: any[] = [
-          index + 1, 
-          item.name, 
-          item.divisions?.restaurants?.name || '-', 
-          item.divisions?.name, 
-          item.stock, 
-          item.stock
-        ];
-        for (let d = 1; d <= daysInMonth; d++) {
-          const dayIn = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'in' || (t.type === 'adjustment' && t.qty > 0))).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
-          const dayOut = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'out' || (t.type === 'adjustment' && t.qty < 0))).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
-          rowData.push(dayIn, dayOut);
-        }
-        worksheet.addRow(rowData);
-      });
+    adjSheet.addRow(['Date & Time', 'Item Name', 'Adjustment Qty', 'Type']);
+    adjSheet.getRow(2).font = { bold: true };
 
-      // --- ADDED BORDER LOGIC START ---
-      worksheet.eachRow({ includeEmpty: false }, (row) => {
+    // Filter only adjustment types from the fetched data
+    const adjustments = transData?.filter(t => t.type === 'adjustment') || [];
+    
+    adjustments.forEach(adj => {
+      const itemRef = Array.isArray(adj.items) ? adj.items[0] : adj.items;
+      adjSheet.addRow([
+        new Date(adj.created_at).toLocaleString(),
+        itemRef?.name || 'Unknown',
+        adj.qty,
+        'MANUAL ADJUSTMENT'
+      ]);
+    });
+
+    // Apply Borders to both sheets
+    workbook.worksheets.forEach(sheet => {
+      sheet.eachRow({ includeEmpty: false }, (row) => {
         row.eachCell({ includeEmpty: false }, (cell) => {
           cell.border = {
             top: { style: 'thin' },
@@ -308,17 +333,17 @@ export default function Home() {
           };
         });
       });
-      // --- ADDED BORDER LOGIC END ---
+    });
 
-      const buffer = await workbook.xlsx.writeBuffer();
-      saveAs(new Blob([buffer]), `Aplus_Report_${month}.xlsx`);
-    } catch (err) {
-      console.error(err);
-      alert("Export failed");
-    } finally {
-      setLoading(false);
-    }
+    const buffer = await workbook.xlsx.writeBuffer();
+    saveAs(new Blob([buffer]), `Aplus_Full_Report_${month}.xlsx`);
+  } catch (err) {
+    console.error(err);
+    alert("Export failed");
+  } finally {
+    setLoading(false);
   }
+}
 
   if (loading) return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 text-gray-400">
