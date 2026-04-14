@@ -1,18 +1,22 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react' // 1. Make sure useRef is imported
 import { supabase } from '../lib/supabaseClient'
 import ExcelJS from 'exceljs'
 import { saveAs } from 'file-saver'
 
 export default function Home() {
+  
+  const [targetUserId, setTargetUserId] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [adminMsg, setAdminMsg] = useState('')
   // --- AUTH & USER STATE ---
   const [user, setUser] = useState<any>(null)
   const [profile, setProfile] = useState<any>(null)
+  const hasInitialized = useRef(false);
   const [loading, setLoading] = useState(true)
   const [username, setUsername] = useState('') 
   const [password, setPassword] = useState('')
-
   // --- INVENTORY STATE ---
   const [items, setItems] = useState<any[]>([])
   const [qtyMap, setQtyMap] = useState<{ [key: string]: any }>({})
@@ -30,21 +34,38 @@ export default function Home() {
   const [editUnit, setEditUnit] = useState('');
 
   // 1. Initial Load
+ // 1. IMPROVED BOOT SEQUENCE
   useEffect(() => {
-    checkUser()
-  }, [])
+    if (hasInitialized.current) return;
+    
+    const initApp = async () => {
+      hasInitialized.current = true;
+      
+      // SAFETY CATCH: If Supabase hangs for more than 5 seconds, stop loading
+      const timeout = setTimeout(() => {
+        if (loading) {
+          console.warn("Supabase took too long. Forcing load-stop.");
+          setLoading(false);
+        }
+      }, 5000);
 
-  // 2. Refresh data when filters or user changes
-  // Update your existing useEffect to look like this:
-    useEffect(() => {
-      // Only fetch if we have a user AND we know which divisions they are allowed to see
-      if (user && profile && allDivisions.length > 0) {
-        fetchItems()
-        fetchTransactions()
+      try {
+        const userProfile = await checkUser();
+        if (userProfile) {
+          // Use Promise.all so they run in parallel (faster)
+          await Promise.all([fetchItems(), fetchTransactions()]);
+        }
+      } catch (err) {
+        console.error("Boot Error:", err);
+      } finally {
+        clearTimeout(timeout);
+        setLoading(false);
       }
-    }, [selectedDivision, profile, user, allDivisions]) // Add allDivisions to the dependency list
+    };
 
-  async function handleLogin() {
+    initApp();
+  }, []);
+async function handleLogin() {
     setLoading(true);
     let loginEmail = username.toLowerCase().trim();
 
@@ -66,55 +87,59 @@ export default function Home() {
   }
 
  async function checkUser() {
-  try {
-    const { data: { user }, error: authError } = await supabase.auth.getUser()
-    if (authError || !user) {
-      setUser(null); setLoading(false); return;
-    }
-    setUser(user)
+    try {
+      // Use getSession first, it's faster for checking local auth state
+      const { data: { session } } = await supabase.auth.getSession();
+      const currentUser = session?.user;
 
-    const { data: prof } = await supabase
-      .from('profiles')
-      .select('*, restaurants(name)')
-      .eq('id', user.id)
-      .single()
-    
-    setProfile(prof)
+      if (!currentUser) {
+        setUser(null);
+        return null;
+      }
 
-    // --- CORRECTION STARTS HERE ---
-    let divQuery = supabase
-      .from('divisions')
-      .select(`id, name, restaurant_id, restaurants!inner ( name )`)
-    
-    // 1. If user is restricted to ONE division, lock it here immediately
-    if (prof?.division_id) {
-      divQuery = divQuery.eq('id', prof.division_id)
-    } 
-    // 2. Otherwise, if they are staff but not restricted to a division, lock to restaurant
-    else if (prof?.role !== 'super-admin' && prof?.restaurant_id) {
-      divQuery = divQuery.eq('restaurant_id', prof.restaurant_id)
-    }
+      setUser(currentUser);
 
-    const { data: divs } = await divQuery
-    const availableDivs = divs || []
-    setAllDivisions(availableDivs)
-    
-    // 3. UI Logic: If they have exactly 1 division available, select it.
-    if (availableDivs.length === 1) {
-      setSelectedDivision(availableDivs[0].id)
-    } else if (prof?.role !== 'super-admin' && availableDivs.length > 0) {
-      setSelectedDivision(availableDivs[0].id)
-    } else {
-      setSelectedDivision('all')
+      const { data: prof, error: profError } = await supabase
+        .from('profiles')
+        .select('*, restaurants(name)')
+        .eq('id', currentUser.id)
+        .single();
+      
+      if (profError) throw profError;
+      
+      setProfile(prof);
+
+      // Fetch divisions
+      let divQuery = supabase
+        .from('divisions')
+        .select(`id, name, restaurant_id, restaurants!inner ( name )`);
+      
+      if (prof?.division_id) {
+        divQuery = divQuery.eq('id', prof.division_id);
+      } else if (prof?.role !== 'super-admin' && prof?.restaurant_id) {
+        divQuery = divQuery.eq('restaurant_id', prof.restaurant_id);
+      }
+
+      const { data: divs } = await divQuery;
+      const availableDivs = divs || [];
+      setAllDivisions(availableDivs);
+      
+      // Set default selection
+      if (availableDivs.length === 1) {
+        setSelectedDivision(availableDivs[0].id);
+      } else if (prof?.role !== 'super-admin' && availableDivs.length > 0) {
+        setSelectedDivision(availableDivs[0].id);
+      } else {
+        setSelectedDivision('all');
+      }
+      
+      return prof;
+    } catch (err) {
+      console.error("Auth System Error:", err);
+      setUser(null);
+      return null;
     }
-    // --- CORRECTION ENDS HERE ---
-    
-  } catch (err) {
-    console.error("System Error:", err)
-  } finally {
-    setLoading(false)
   }
-}
     async function fetchItems() {
     // 1. Safety Gate: Don't run if profile or divisions aren't loaded yet
     if (!profile || (profile.role !== 'super-admin' && allDivisions.length === 0)) {
@@ -143,26 +168,54 @@ export default function Home() {
   }
 
   async function fetchTransactions() {
-    if (!profile) return
-
-    // Transactions table links to Items table via item_id
-    let query = supabase
+    // 1. If not logged in or profile not ready, stop.
+   if (!user || !profile) return;
+      let query = supabase
       .from('transactions')
-      .select(`id, qty, type, created_at, item_id, items!inner ( name, unit, division_id )`)
+      .select(`
+        id, 
+        qty, 
+        type, 
+        created_at, 
+        item_id, 
+        items!inner ( name, unit, division_id ),
+        author:profiles!profile_id ( username )  // <--- ADD 'author:' HERE
+      `)
       .order('created_at', { ascending: false })
-      .limit(30)
+      .limit(30);
 
+    // 2. Filter Logic
     if (selectedDivision !== 'all') {
-        query = query.eq('items.division_id', selectedDivision)
+      query = query.eq('items.division_id', selectedDivision);
     } else if (profile.role !== 'super-admin') {
-        // Staff only sees transactions for items belonging to their divisions
-        const authorizedIds = allDivisions.map(d => d.id)
-        query = query.in('items.division_id', authorizedIds)
+      // If Global View is selected but user is STAFF, 
+      // we must ensure authorizedIds is NOT empty.
+      const authorizedIds = allDivisions.map(d => d.id);
+      
+      if (authorizedIds.length > 0) {
+        query = query.in('items.division_id', authorizedIds);
+      } else {
+        // If we don't have division IDs yet, don't query (avoids 0 results)
+        return;
+      }
     }
 
-    const { data } = await query
-    if (data) setTransactions(data)
+    const { data, error } = await query;
+    if (error) {
+      console.error("Transaction Fetch Error:", error.message);
+    } else {
+      setTransactions(data || []);
+    }
   }
+
+  // 3. REFRESH DATA ON DROPDOWN CHANGE
+  // This ensures that when you switch from "Global" to a specific branch, it re-fetches
+  useEffect(() => {
+    if (hasInitialized.current && user && profile) {
+      fetchItems();
+      fetchTransactions();
+    }
+  }, [selectedDivision]);
 
   async function addNewItem() {
     if (!newItem) return
@@ -344,6 +397,25 @@ export default function Home() {
     setLoading(false);
   }
 }
+async function handleAdminPasswordChange() {
+  if (!targetUserId || !newPassword) return alert("Select a user and type a password");
+
+  const { data, error } = await supabase.rpc('admin_change_password', {
+    target_user_id: targetUserId,
+    new_password: newPassword
+  });
+
+  if (error) {
+    setAdminMsg("Error: " + error.message);
+  } else {
+    setAdminMsg("Success: Password changed!");
+    setNewPassword(''); // Clear the input
+  }
+}
+
+
+
+//----UI Starts Here--
 
   if (loading) return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 text-gray-400">
@@ -524,7 +596,7 @@ export default function Home() {
             </div>
           ))}
         </div>
-
+      
       {/* Activity Feed */}
       <div className="mt-10 mb-20">
         <h2 className="text-sm font-black text-gray-400 uppercase tracking-widest mb-4">
@@ -535,7 +607,6 @@ export default function Home() {
           {transactions
             .filter((t: any) => {
               const itemRef = Array.isArray(t.items) ? t.items[0] : t.items;
-              // If there is no search, show all. If there is, match item name.
               return !search || itemRef?.name?.toLowerCase().includes(search.toLowerCase());
             })
             .length === 0 && (
@@ -549,14 +620,33 @@ export default function Home() {
               return !search || itemRef?.name?.toLowerCase().includes(search.toLowerCase());
             })
             .map((t: any) => {
+              // DEBUG: Remove this once it works!
+              console.log("Transaction Data:", t);
+
               const itemRef = Array.isArray(t.items) ? t.items[0] : t.items;
+              
+              // Look for our renamed 'author' field or the default 'profiles'
+              const profileData = t.author || (Array.isArray(t.profiles) ? t.profiles[0] : t.profiles);
+              const displayUser = profileData?.username || 'System';
+
               return (
                 <div key={t.id} className="text-sm p-4 border-b last:border-0 flex justify-between items-center hover:bg-gray-50">
                   <div className="flex flex-col">
                     <span className="font-bold text-gray-700">{itemRef?.name || 'Unknown Item'}</span>
-                    <span className="text-[10px] text-gray-400">{new Date(t.created_at).toLocaleString()}</span>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className="text-[10px] text-gray-400">{new Date(t.created_at).toLocaleString()}</span>
+                      
+                      <span className="text-[9px] font-black bg-blue-50 text-blue-500 px-1.5 py-0.5 rounded uppercase border border-blue-100">
+                        👤 {displayUser}
+                      </span>
+                    </div>
                   </div>
-                  <span className={`font-black px-3 py-1 rounded-full text-[10px] ${t.type === 'in' ? 'bg-green-100 text-green-700' : t.type === 'adjustment' ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`}>
+                  
+                  <span className={`font-black px-3 py-1 rounded-full text-[10px] ${
+                    t.type === 'in' ? 'bg-green-100 text-green-700' : 
+                    t.type === 'adjustment' ? 'bg-amber-100 text-amber-700' : 
+                    'bg-red-100 text-red-700'
+                  }`}>
                     {t.type.toUpperCase()} {t.qty > 0 ? `+${t.qty}` : t.qty}
                   </span>
                 </div>
