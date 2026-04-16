@@ -32,7 +32,7 @@ export default function Home() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [editUnit, setEditUnit] = useState('');
-
+  const [showEmptyOnly, setShowEmptyOnly] = useState(false);
   // 1. Initial Load
  // 1. IMPROVED BOOT SEQUENCE
   useEffect(() => {
@@ -528,7 +528,16 @@ async function handleAdminPasswordChange() {
               <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">Search</label>
               <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search..." className="w-full border p-2.5 rounded-lg text-sm bg-gray-50 outline-blue-500 text-black" />
             </div>
-
+          <button 
+            onClick={() => setShowEmptyOnly(!showEmptyOnly)}
+            className={`px-3 py-1.5 rounded-md text-[10px] font-black transition-all shadow-sm border uppercase tracking-tight ${
+              showEmptyOnly 
+              ? 'bg-red-600 text-white border-red-700' 
+              : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
+            }`}
+          >
+            {showEmptyOnly ? 'Show All' : 'Out Of Stock'}
+          </button>   
             <div className="flex-none">
               <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">Report</label>
               <div className="flex gap-1">
@@ -542,7 +551,19 @@ async function handleAdminPasswordChange() {
 
         {/* Item List */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
-          {items.filter(i => i.name.toLowerCase().includes(search.toLowerCase())).map((item: any) => (
+          {items
+            .filter((i: any) => {
+              // 1. First, apply the Search filter
+              const matchesSearch = i.name.toLowerCase().includes(search.toLowerCase());
+              
+              // 2. Second, apply the Out of Stock filter only if the button is active
+              // If showEmptyOnly is true, we only show items with 0 stock.
+              // If showEmptyOnly is false, we show everything.
+              const matchesStock = showEmptyOnly ? i.stock === 0 : true;
+
+              return matchesSearch && matchesStock;
+            })
+            .map((item: any) => (
             <div key={item.id} className="bg-white border p-4 rounded-xl flex flex-col gap-3 shadow-sm hover:shadow-md transition-all">
               <div className="flex justify-between items-start">
                 <div className="w-full">
