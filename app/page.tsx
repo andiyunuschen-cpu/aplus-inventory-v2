@@ -239,30 +239,65 @@ async function handleLogin() {
     }
   }
 
-  async function updateStock(itemId: string, qty: any) {
-    const numQty = Number(qty);
-    if (!numQty) return 
-    const { error } = await supabase.rpc('update_stock', { item_id: itemId, qty: numQty })
-    if (!error) { 
-        setQtyMap(prev => ({ ...prev, [itemId]: '' })); 
-        fetchItems(); 
-        fetchTransactions(); 
-    } else {
-        alert("Action failed: Check permissions.")
-    }
-  }
+async function updateStock(itemId: string, numQty: number) {
+    // 1. THE STRICT GATE: If the button sends a negative, 
+    // it's because the user typed a negative or clicked "OUT".
+    // We only want to block if the RAW value they typed is negative.
+    
+    // We check the original input from your qtyMap
+    const rawInput = Number(qtyMap[itemId]); 
 
-  async function adjustStock(itemId: string, qty: any) {
+    if (rawInput < 0) {
+        alert("Error: Please enter a positive quantity. The 'OUT' button will handle the subtraction for you.");
+        return; 
+    }
+
+    if (!numQty || numQty === 0) return;
+
+    // 2. Existing Stock Check
+    const item = items.find(i => i.id === itemId);
+    const currentStock = item?.stock || 0;
+
+    if (numQty < 0 && Math.abs(numQty) > currentStock) {
+        alert(`Transaction failed: Not enough stock! Current: ${currentStock}`);
+        return;
+    }
+
+    // 3. Database Call
+    const { error } = await supabase.rpc('update_stock', { 
+        item_id: itemId, 
+        qty: numQty 
+    });
+
+    if (!error) {
+        setQtyMap(prev => ({ ...prev, [itemId]: '' }));
+        fetchItems();
+        fetchTransactions();
+    } else {
+        alert("Action failed: Database error.");
+    }
+}
+
+ async function adjustStock(itemId: string, qty: any) {
     const numQty = Number(qty);
     if (isNaN(numQty) || qty === '') return;
+    
+    // 1. BLOCK NEGATIVE ADJUSTMENTS
+    if (numQty < 0) {
+        alert("Inventory count cannot be negative. Please check the physical stock again.");
+        return;
+    }
+
     if (!confirm(`Set stock to exactly ${numQty}?`)) return;
+
     const { error } = await supabase.rpc('adjust_stock', { item_id: itemId, new_qty: numQty })
+    
     if (!error) { 
         setQtyMap(prev => ({ ...prev, [itemId]: '' })); 
         fetchItems(); 
         fetchTransactions(); 
     }
-  }
+}
   async function deleteItem(itemId: string, itemName: string) {
   if (!confirm(`WARNING: This will permanently delete "${itemName}" and ALL its transaction history. Proceed?`)) return;
   
@@ -580,8 +615,8 @@ async function handleAdminPasswordChange() {
               
               {/* Transaction Input Area */}
               <div className="flex gap-1 items-center bg-gray-50 p-2 rounded-lg mt-auto">
-                <input type="number" value={qtyMap[item.id] || ''} onChange={(e) => setQtyMap({...qtyMap, [item.id]: e.target.value})} className="border w-full p-2 text-center rounded-lg font-bold outline-blue-500 text-black" placeholder="Qty" />
-                <button onClick={() => updateStock(item.id, qtyMap[item.id])} className="bg-green-500 text-white px-3 py-2 rounded-lg text-xs font-bold">IN</button>
+                <input type="number" value={qtyMap[item.id] || ''} onChange={(e) => setQtyMap({...qtyMap, [item.id]: e.target.value})} onKeyDown={(e) => { if (e.key === '-') e.preventDefault(); }} className="border w-full p-2 text-center rounded-lg font-bold outline-blue-500 text-black" min="1" placeholder="Qty" />
+                <button onClick={() => updateStock(item.id, Math.abs(Number(qtyMap[item.id])))} className="bg-green-500 text-white px-3 py-2 rounded-lg text-xs font-bold">IN</button>
                 <button onClick={() => updateStock(item.id, -Math.abs(Number(qtyMap[item.id])))} className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold">OUT</button>
                 
                 {(profile?.role === 'super-admin' || ['aplus', 'harsa', 'titanium'].includes(profile?.username)) && (
