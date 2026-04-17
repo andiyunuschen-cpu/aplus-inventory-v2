@@ -175,6 +175,7 @@ async function handleLogin() {
       .select(`
         id, 
         qty, 
+        prev_qty,
         type, 
         created_at, 
         item_id, 
@@ -281,16 +282,24 @@ async function updateStock(itemId: string, numQty: number) {
  async function adjustStock(itemId: string, qty: any) {
     const numQty = Number(qty);
     if (isNaN(numQty) || qty === '') return;
-    
-    // 1. BLOCK NEGATIVE ADJUSTMENTS
     if (numQty < 0) {
-        alert("Inventory count cannot be negative. Please check the physical stock again.");
+        alert("Inventory count cannot be negative.");
         return;
     }
 
-    if (!confirm(`Set stock to exactly ${numQty}?`)) return;
+    // 1. GET THE "BEFORE" VALUE FROM YOUR CURRENT ITEMS LIST
+    const item = items.find(i => i.id === itemId);
+    const oldQty = item?.stock || 0;
 
-    const { error } = await supabase.rpc('adjust_stock', { item_id: itemId, new_qty: numQty })
+    if (!confirm(`Set stock for ${item.name} from ${oldQty} to ${numQty}?`)) return;
+
+    // 2. We send the update. 
+    // Note: To show "Before" in Excel later, we are relying on your 
+    // transactions table having a field for it. 
+    const { error } = await supabase.rpc('adjust_stock', { 
+        item_id: itemId, 
+        new_qty: numQty 
+    })
     
     if (!error) { 
         setQtyMap(prev => ({ ...prev, [itemId]: '' })); 
@@ -336,29 +345,53 @@ async function updateStock(itemId: string, numQty: number) {
     const [yearStr, monthStr] = month.split('-');
     const year = parseInt(yearStr);
     const monthIdx = parseInt(monthStr) - 1;
-    const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
     
+    // 1. Calculate the start and end of the month correctly
+    const startDate = `${month}-01`;
+    const endDate = monthIdx === 11 
+      ? `${year + 1}-01-01` 
+      : `${year}-${String(monthIdx + 2).padStart(2, '0')}-01`;
+
     const workbook = new ExcelJS.Workbook();
     
-    // --- TAB 1: MONTHLY INVENTORY ---
-    const worksheet = workbook.addWorksheet('Monthly Inventory');
-
-    const { data: transData } = await supabase
+    // 2. PREPARE THE QUERY
+    let transQuery = supabase
       .from('transactions')
-      .select('qty, type, created_at, item_id, items!inner(name, division_id)')
-      .gte('created_at', `${month}-01`)
-      .lt('created_at', monthIdx === 11 ? `${year + 1}-01-01` : `${year}-${String(monthIdx + 2).padStart(2, '0')}-01`);
+      .select(`
+        qty, 
+        prev_qty, 
+        type, 
+        created_at, 
+        item_id, 
+        items!inner(name, division_id, divisions(name, restaurants(name))),
+        author:profiles!profile_id ( username )
+      `)
+      .gte('created_at', startDate)
+      .lt('created_at', endDate);
 
+    // 3. APPLY DIVISION FILTER (This fixes the "Mixed Divisions" issue)
+    if (selectedDivision !== 'all') {
+      transQuery = transQuery.eq('items.division_id', selectedDivision);
+    }
+
+    const { data: transData, error: transError } = await transQuery;
+    if (transError) throw transError;
+
+    // Identify current division name for headers
     const currentDiv = allDivisions.find(d => d.id === selectedDivision);
     const currentDivName = currentDiv 
       ? `${currentDiv.restaurants?.name || 'Branch'} - ${currentDiv.name}` 
       : 'All Authorized Branches';
+
+    // --- TAB 1: MONTHLY INVENTORY ---
+    const worksheet = workbook.addWorksheet('Monthly Inventory');
+    const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
     
     worksheet.addRow([`INVENTORY REPORT: ${currentDivName} (${month})`]);
     worksheet.mergeCells(1, 1, 1, 6);
     worksheet.getRow(1).font = { bold: true, size: 14 };
 
-    const headerRow2 = ['Number', 'Item Name', 'Restaurant', 'Division', 'Initial', 'Final'];
+    const headerRow2 = ['No', 'Item Name', 'Restaurant', 'Division', 'Initial', 'Final'];
     const headerRow3 = ['', '', '', '', '', ''];
 
     for (let d = 1; d <= daysInMonth; d++) {
@@ -380,54 +413,54 @@ async function updateStock(itemId: string, numQty: number) {
         item.stock
       ];
       for (let d = 1; d <= daysInMonth; d++) {
-        const dayIn = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'in' || (t.type === 'adjustment' && t.qty > 0))).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
-        const dayOut = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'out' || (t.type === 'adjustment' && t.qty < 0))).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
+        const dayIn = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'in')).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
+        const dayOut = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'out')).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
         rowData.push(dayIn, dayOut);
       }
       worksheet.addRow(rowData);
     });
 
-    // --- TAB 2: ADJUSTMENT LOGS ---
+    // --- TAB 2: ADJUSTMENT LOGS (Now Filtered) ---
     const adjSheet = workbook.addWorksheet('Adjustment History');
     adjSheet.addRow([`ADJUSTMENT LOG: ${currentDivName} (${month})`]);
-    adjSheet.mergeCells(1, 1, 1, 4);
+    adjSheet.mergeCells(1, 1, 1, 5); 
     adjSheet.getRow(1).font = { bold: true, size: 14 };
 
-    adjSheet.addRow(['Date & Time', 'Item Name', 'Adjustment Qty', 'Type']);
+    adjSheet.addRow(['Date & Time', 'Item Name', 'Stock Before', 'Adjustment', 'Final Result']);
     adjSheet.getRow(2).font = { bold: true };
 
-    // Filter only adjustment types from the fetched data
     const adjustments = transData?.filter(t => t.type === 'adjustment') || [];
-    
-    adjustments.forEach(adj => {
+
+    adjustments.forEach((adj: any) => {
       const itemRef = Array.isArray(adj.items) ? adj.items[0] : adj.items;
+      const finalResult = adj.qty;
+      const stockBefore = adj.prev_qty || 0;
+      const difference = finalResult - stockBefore;
+
       adjSheet.addRow([
         new Date(adj.created_at).toLocaleString(),
         itemRef?.name || 'Unknown',
-        adj.qty,
-        'MANUAL ADJUSTMENT'
+        stockBefore,
+        difference > 0 ? `+${difference}` : difference,
+        finalResult
       ]);
     });
 
-    // Apply Borders to both sheets
+    // Final formatting and save
     workbook.worksheets.forEach(sheet => {
       sheet.eachRow({ includeEmpty: false }, (row) => {
         row.eachCell({ includeEmpty: false }, (cell) => {
-          cell.border = {
-            top: { style: 'thin' },
-            left: { style: 'thin' },
-            bottom: { style: 'thin' },
-            right: { style: 'thin' }
-          };
+          cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
         });
       });
     });
 
     const buffer = await workbook.xlsx.writeBuffer();
-    saveAs(new Blob([buffer]), `Aplus_Full_Report_${month}.xlsx`);
+    saveAs(new Blob([buffer]), `Inventory_Report_${currentDivName.replace(/\s+/g, '_')}_${month}.xlsx`);
+    
   } catch (err) {
     console.error(err);
-    alert("Export failed");
+    alert("Export failed. Check console for details.");
   } finally {
     setLoading(false);
   }
