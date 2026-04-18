@@ -32,7 +32,7 @@ export default function Home() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [editUnit, setEditUnit] = useState('');
-  const [showEmptyOnly, setShowEmptyOnly] = useState(false);
+
   // 1. Initial Load
  // 1. IMPROVED BOOT SEQUENCE
   useEffect(() => {
@@ -175,7 +175,6 @@ async function handleLogin() {
       .select(`
         id, 
         qty, 
-        prev_qty,
         type, 
         created_at, 
         item_id, 
@@ -240,73 +239,30 @@ async function handleLogin() {
     }
   }
 
-async function updateStock(itemId: string, numQty: number) {
-    // 1. THE STRICT GATE: If the button sends a negative, 
-    // it's because the user typed a negative or clicked "OUT".
-    // We only want to block if the RAW value they typed is negative.
-    
-    // We check the original input from your qtyMap
-    const rawInput = Number(qtyMap[itemId]); 
-
-    if (rawInput < 0) {
-        alert("Error: Please enter a positive quantity. The 'OUT' button will handle the subtraction for you.");
-        return; 
-    }
-
-    if (!numQty || numQty === 0) return;
-
-    // 2. Existing Stock Check
-    const item = items.find(i => i.id === itemId);
-    const currentStock = item?.stock || 0;
-
-    if (numQty < 0 && Math.abs(numQty) > currentStock) {
-        alert(`Transaction failed: Not enough stock! Current: ${currentStock}`);
-        return;
-    }
-
-    // 3. Database Call
-    const { error } = await supabase.rpc('update_stock', { 
-        item_id: itemId, 
-        qty: numQty 
-    });
-
-    if (!error) {
-        setQtyMap(prev => ({ ...prev, [itemId]: '' }));
-        fetchItems();
-        fetchTransactions();
+  async function updateStock(itemId: string, qty: any) {
+    const numQty = Number(qty);
+    if (!numQty) return 
+    const { error } = await supabase.rpc('update_stock', { item_id: itemId, qty: numQty })
+    if (!error) { 
+        setQtyMap(prev => ({ ...prev, [itemId]: '' })); 
+        fetchItems(); 
+        fetchTransactions(); 
     } else {
-        alert("Action failed: Database error.");
+        alert("Action failed: Check permissions.")
     }
-}
+  }
 
- async function adjustStock(itemId: string, qty: any) {
+  async function adjustStock(itemId: string, qty: any) {
     const numQty = Number(qty);
     if (isNaN(numQty) || qty === '') return;
-    if (numQty < 0) {
-        alert("Inventory count cannot be negative.");
-        return;
-    }
-
-    // 1. GET THE "BEFORE" VALUE FROM YOUR CURRENT ITEMS LIST
-    const item = items.find(i => i.id === itemId);
-    const oldQty = item?.stock || 0;
-
-    if (!confirm(`Set stock for ${item.name} from ${oldQty} to ${numQty}?`)) return;
-
-    // 2. We send the update. 
-    // Note: To show "Before" in Excel later, we are relying on your 
-    // transactions table having a field for it. 
-    const { error } = await supabase.rpc('adjust_stock', { 
-        item_id: itemId, 
-        new_qty: numQty 
-    })
-    
+    if (!confirm(`Set stock to exactly ${numQty}?`)) return;
+    const { error } = await supabase.rpc('adjust_stock', { item_id: itemId, new_qty: numQty })
     if (!error) { 
         setQtyMap(prev => ({ ...prev, [itemId]: '' })); 
         fetchItems(); 
         fetchTransactions(); 
     }
-}
+  }
   async function deleteItem(itemId: string, itemName: string) {
   if (!confirm(`WARNING: This will permanently delete "${itemName}" and ALL its transaction history. Proceed?`)) return;
   
@@ -345,53 +301,29 @@ async function updateStock(itemId: string, numQty: number) {
     const [yearStr, monthStr] = month.split('-');
     const year = parseInt(yearStr);
     const monthIdx = parseInt(monthStr) - 1;
+    const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
     
-    // 1. Calculate the start and end of the month correctly
-    const startDate = `${month}-01`;
-    const endDate = monthIdx === 11 
-      ? `${year + 1}-01-01` 
-      : `${year}-${String(monthIdx + 2).padStart(2, '0')}-01`;
-
     const workbook = new ExcelJS.Workbook();
     
-    // 2. PREPARE THE QUERY
-    let transQuery = supabase
+    // --- TAB 1: MONTHLY INVENTORY ---
+    const worksheet = workbook.addWorksheet('Monthly Inventory');
+
+    const { data: transData } = await supabase
       .from('transactions')
-      .select(`
-        qty, 
-        prev_qty, 
-        type, 
-        created_at, 
-        item_id, 
-        items!inner(name, division_id, divisions(name, restaurants(name))),
-        author:profiles!profile_id ( username )
-      `)
-      .gte('created_at', startDate)
-      .lt('created_at', endDate);
+      .select('qty, type, created_at, item_id, items!inner(name, division_id)')
+      .gte('created_at', `${month}-01`)
+      .lt('created_at', monthIdx === 11 ? `${year + 1}-01-01` : `${year}-${String(monthIdx + 2).padStart(2, '0')}-01`);
 
-    // 3. APPLY DIVISION FILTER (This fixes the "Mixed Divisions" issue)
-    if (selectedDivision !== 'all') {
-      transQuery = transQuery.eq('items.division_id', selectedDivision);
-    }
-
-    const { data: transData, error: transError } = await transQuery;
-    if (transError) throw transError;
-
-    // Identify current division name for headers
     const currentDiv = allDivisions.find(d => d.id === selectedDivision);
     const currentDivName = currentDiv 
       ? `${currentDiv.restaurants?.name || 'Branch'} - ${currentDiv.name}` 
       : 'All Authorized Branches';
-
-    // --- TAB 1: MONTHLY INVENTORY ---
-    const worksheet = workbook.addWorksheet('Monthly Inventory');
-    const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
     
     worksheet.addRow([`INVENTORY REPORT: ${currentDivName} (${month})`]);
     worksheet.mergeCells(1, 1, 1, 6);
     worksheet.getRow(1).font = { bold: true, size: 14 };
 
-    const headerRow2 = ['No', 'Item Name', 'Restaurant', 'Division', 'Initial', 'Final'];
+    const headerRow2 = ['Number', 'Item Name', 'Restaurant', 'Division', 'Initial', 'Final'];
     const headerRow3 = ['', '', '', '', '', ''];
 
     for (let d = 1; d <= daysInMonth; d++) {
@@ -413,54 +345,54 @@ async function updateStock(itemId: string, numQty: number) {
         item.stock
       ];
       for (let d = 1; d <= daysInMonth; d++) {
-        const dayIn = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'in')).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
-        const dayOut = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'out')).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
+        const dayIn = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'in' || (t.type === 'adjustment' && t.qty > 0))).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
+        const dayOut = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'out' || (t.type === 'adjustment' && t.qty < 0))).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
         rowData.push(dayIn, dayOut);
       }
       worksheet.addRow(rowData);
     });
 
-    // --- TAB 2: ADJUSTMENT LOGS (Now Filtered) ---
+    // --- TAB 2: ADJUSTMENT LOGS ---
     const adjSheet = workbook.addWorksheet('Adjustment History');
     adjSheet.addRow([`ADJUSTMENT LOG: ${currentDivName} (${month})`]);
-    adjSheet.mergeCells(1, 1, 1, 5); 
+    adjSheet.mergeCells(1, 1, 1, 4);
     adjSheet.getRow(1).font = { bold: true, size: 14 };
 
-    adjSheet.addRow(['Date & Time', 'Item Name', 'Stock Before', 'Adjustment', 'Final Result']);
+    adjSheet.addRow(['Date & Time', 'Item Name', 'Adjustment Qty', 'Type']);
     adjSheet.getRow(2).font = { bold: true };
 
+    // Filter only adjustment types from the fetched data
     const adjustments = transData?.filter(t => t.type === 'adjustment') || [];
-
-    adjustments.forEach((adj: any) => {
+    
+    adjustments.forEach(adj => {
       const itemRef = Array.isArray(adj.items) ? adj.items[0] : adj.items;
-      const finalResult = adj.qty;
-      const stockBefore = adj.prev_qty || 0;
-      const difference = finalResult - stockBefore;
-
       adjSheet.addRow([
         new Date(adj.created_at).toLocaleString(),
         itemRef?.name || 'Unknown',
-        stockBefore,
-        difference > 0 ? `+${difference}` : difference,
-        finalResult
+        adj.qty,
+        'MANUAL ADJUSTMENT'
       ]);
     });
 
-    // Final formatting and save
+    // Apply Borders to both sheets
     workbook.worksheets.forEach(sheet => {
       sheet.eachRow({ includeEmpty: false }, (row) => {
         row.eachCell({ includeEmpty: false }, (cell) => {
-          cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+          cell.border = {
+            top: { style: 'thin' },
+            left: { style: 'thin' },
+            bottom: { style: 'thin' },
+            right: { style: 'thin' }
+          };
         });
       });
     });
 
     const buffer = await workbook.xlsx.writeBuffer();
-    saveAs(new Blob([buffer]), `Inventory_Report_${currentDivName.replace(/\s+/g, '_')}_${month}.xlsx`);
-    
+    saveAs(new Blob([buffer]), `Aplus_Full_Report_${month}.xlsx`);
   } catch (err) {
     console.error(err);
-    alert("Export failed. Check console for details.");
+    alert("Export failed");
   } finally {
     setLoading(false);
   }
@@ -561,16 +493,7 @@ async function handleAdminPasswordChange() {
               <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">Search</label>
               <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search..." className="w-full border p-2.5 rounded-lg text-sm bg-gray-50 outline-blue-500 text-black" />
             </div>
-          <button 
-            onClick={() => setShowEmptyOnly(!showEmptyOnly)}
-            className={`px-3 py-1.5 rounded-md text-[10px] font-black transition-all shadow-sm border uppercase tracking-tight ${
-              showEmptyOnly 
-              ? 'bg-red-600 text-white border-red-700' 
-              : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
-            }`}
-          >
-            {showEmptyOnly ? 'Show All' : 'Out Of Stock'}
-          </button>   
+
             <div className="flex-none">
               <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">Report</label>
               <div className="flex gap-1">
@@ -584,19 +507,7 @@ async function handleAdminPasswordChange() {
 
         {/* Item List */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
-          {items
-            .filter((i: any) => {
-              // 1. First, apply the Search filter
-              const matchesSearch = i.name.toLowerCase().includes(search.toLowerCase());
-              
-              // 2. Second, apply the Out of Stock filter only if the button is active
-              // If showEmptyOnly is true, we only show items with 0 stock.
-              // If showEmptyOnly is false, we show everything.
-              const matchesStock = showEmptyOnly ? i.stock === 0 : true;
-
-              return matchesSearch && matchesStock;
-            })
-            .map((item: any) => (
+          {items.filter(i => i.name.toLowerCase().includes(search.toLowerCase())).map((item: any) => (
             <div key={item.id} className="bg-white border p-4 rounded-xl flex flex-col gap-3 shadow-sm hover:shadow-md transition-all">
               <div className="flex justify-between items-start">
                 <div className="w-full">
@@ -669,8 +580,8 @@ async function handleAdminPasswordChange() {
               
               {/* Transaction Input Area */}
               <div className="flex gap-1 items-center bg-gray-50 p-2 rounded-lg mt-auto">
-                <input type="number" value={qtyMap[item.id] || ''} onChange={(e) => setQtyMap({...qtyMap, [item.id]: e.target.value})} onKeyDown={(e) => { if (e.key === '-') e.preventDefault(); }} className="border w-full p-2 text-center rounded-lg font-bold outline-blue-500 text-black" min="1" placeholder="Qty" />
-                <button onClick={() => updateStock(item.id, Math.abs(Number(qtyMap[item.id])))} className="bg-green-500 text-white px-3 py-2 rounded-lg text-xs font-bold">IN</button>
+                <input type="number" value={qtyMap[item.id] || ''} onChange={(e) => setQtyMap({...qtyMap, [item.id]: e.target.value})} className="border w-full p-2 text-center rounded-lg font-bold outline-blue-500 text-black" placeholder="Qty" />
+                <button onClick={() => updateStock(item.id, qtyMap[item.id])} className="bg-green-500 text-white px-3 py-2 rounded-lg text-xs font-bold">IN</button>
                 <button onClick={() => updateStock(item.id, -Math.abs(Number(qtyMap[item.id])))} className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold">OUT</button>
                 
                 {(profile?.role === 'super-admin' || ['aplus', 'harsa', 'titanium'].includes(profile?.username)) && (
