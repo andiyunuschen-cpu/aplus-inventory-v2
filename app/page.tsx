@@ -33,6 +33,7 @@ export default function Home() {
   const [editName, setEditName] = useState('');
   const [editUnit, setEditUnit] = useState('');
   const [showEmptyOnly, setShowEmptyOnly] = useState(false);
+  const [destMap, setDestMap] = useState<{ [key: string]: string }>({});
   // 1. Initial Load
  // 1. IMPROVED BOOT SEQUENCE
   useEffect(() => {
@@ -112,8 +113,15 @@ async function handleLogin() {
       // Fetch divisions
       let divQuery = supabase
         .from('divisions')
-        .select(`id, name, restaurant_id, restaurants!inner ( name )`);
-      
+        .select(`
+          id, 
+          name, 
+          restaurant_id, 
+          restaurants (
+            id,
+            name
+          )
+        `);      
       if (prof?.division_id) {
         divQuery = divQuery.eq('id', prof.division_id);
       } else if (prof?.role !== 'super-admin' && prof?.restaurant_id) {
@@ -180,11 +188,11 @@ async function handleLogin() {
         created_at, 
         item_id, 
         items!inner ( name, unit, division_id ),
-        author:profiles!profile_id ( username )  // <--- ADD 'author:' HERE
+        author:profiles!profile_id ( username ),
+        destination:restaurants!destination_id ( name )
       `)
       .order('created_at', { ascending: false })
       .limit(30);
-
     // 2. Filter Logic
     if (selectedDivision !== 'all') {
       query = query.eq('items.division_id', selectedDivision);
@@ -217,7 +225,22 @@ async function handleLogin() {
       fetchTransactions();
     }
   }, [selectedDivision]);
+// This looks at the selected division and sets the dropdowns automatically
+  useEffect(() => {
+    if (selectedDivision !== 'all') {
+      const currentDiv = allDivisions.find(d => d.id === selectedDivision);
+      if (currentDiv?.restaurant_id) {
+        const defaultDest = currentDiv.restaurant_id;
+        const newDestMap: any = {};
+        items.forEach(item => {
+          newDestMap[item.id] = defaultDest;
+        });
+        setDestMap(newDestMap);
+      }
+    }
+  }, [selectedDivision, items]);
 
+// ... start of addNewItem ...
   async function addNewItem() {
     if (!newItem) return
     const targetDivision = selectedDivision !== 'all' ? selectedDivision : (profile.role === 'staff' ? allDivisions[0]?.id : null)
@@ -240,34 +263,20 @@ async function handleLogin() {
     }
   }
 
-async function updateStock(itemId: string, numQty: number) {
-    // 1. THE STRICT GATE: If the button sends a negative, 
-    // it's because the user typed a negative or clicked "OUT".
-    // We only want to block if the RAW value they typed is negative.
-    
-    // We check the original input from your qtyMap
-    const rawInput = Number(qtyMap[itemId]); 
+async function updateStock(itemId: string, numQty: number, destId?: string) {
+    if (!numQty || numQty === 0) return;
 
+    // Check for negative input bypass
+    const rawInput = Number(qtyMap[itemId]); 
     if (rawInput < 0) {
-        alert("Error: Please enter a positive quantity. The 'OUT' button will handle the subtraction for you.");
+        alert("Please enter a positive number. Use 'OUT' to subtract.");
         return; 
     }
 
-    if (!numQty || numQty === 0) return;
-
-    // 2. Existing Stock Check
-    const item = items.find(i => i.id === itemId);
-    const currentStock = item?.stock || 0;
-
-    if (numQty < 0 && Math.abs(numQty) > currentStock) {
-        alert(`Transaction failed: Not enough stock! Current: ${currentStock}`);
-        return;
-    }
-
-    // 3. Database Call
     const { error } = await supabase.rpc('update_stock', { 
         item_id: itemId, 
-        qty: numQty 
+        qty: numQty,
+        dest_id: destId || null 
     });
 
     if (!error) {
@@ -275,7 +284,7 @@ async function updateStock(itemId: string, numQty: number) {
         fetchItems();
         fetchTransactions();
     } else {
-        alert("Action failed: Database error.");
+        alert("Action failed: " + error.message);
     }
 }
 
@@ -573,7 +582,7 @@ async function handleAdminPasswordChange() {
               : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
             }`}
           >
-            {showEmptyOnly ? 'Show All' : 'Out Of Stock'}
+            {showEmptyOnly ? 'Show All' : 'Low Stock'}
           </button>   
             <div className="flex-none">
               <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">Report</label>
@@ -596,7 +605,7 @@ async function handleAdminPasswordChange() {
               // 2. Second, apply the Out of Stock filter only if the button is active
               // If showEmptyOnly is true, we only show items with 0 stock.
               // If showEmptyOnly is false, we show everything.
-              const matchesStock = showEmptyOnly ? i.stock === 0 : true;
+              const matchesStock = showEmptyOnly ? i.stock <= 2 : true;
 
               return matchesSearch && matchesStock;
             })
@@ -671,20 +680,72 @@ async function handleAdminPasswordChange() {
                 )}
               </div>
               
-              {/* Transaction Input Area */}
-              <div className="flex gap-1 items-center bg-gray-50 p-2 rounded-lg mt-auto">
-                <input type="number" value={qtyMap[item.id] || ''} onChange={(e) => setQtyMap({...qtyMap, [item.id]: e.target.value})} onKeyDown={(e) => { if (e.key === '-') e.preventDefault(); }} className="border w-full p-2 text-center rounded-lg font-bold outline-blue-500 text-black" min="1" placeholder="Qty" />
-                <button onClick={() => updateStock(item.id, Math.abs(Number(qtyMap[item.id])))} className="bg-green-500 text-white px-3 py-2 rounded-lg text-xs font-bold">IN</button>
-                <button onClick={() => updateStock(item.id, -Math.abs(Number(qtyMap[item.id])))} className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold">OUT</button>
+            {/* Transaction Input Area */}
+              <div className="flex flex-col gap-2 bg-gray-50 p-2 rounded-lg mt-auto">
                 
-                {(profile?.role === 'super-admin' || ['aplus', 'harsa', 'titanium'].includes(profile?.username)) && (
-                  <button 
-                    onClick={() => adjustStock(item.id, qtyMap[item.id])} 
-                    className="bg-amber-500 text-white px-3 py-2 rounded-lg text-xs font-bold"
+                {/* Destination Dropdown */}
+                <div className="flex flex-col px-1">
+                  <label className="text-[9px] font-black text-gray-400 uppercase tracking-tighter">Destination</label>
+                  <select 
+                    value={destMap[item.id] || ''} 
+                    onChange={(e) => setDestMap({...destMap, [item.id]: e.target.value})}
+                    className="text-[10px] p-1 bg-white border rounded border-gray-200 outline-blue-500 font-bold text-gray-700"
                   >
-                    ADJ
+                    <option value="">-- Select Destination --</option>
+                    {allDivisions && Array.from(
+                      new Map(
+                        allDivisions
+                          .filter(d => d && (d.restaurant_id || d.restaurants?.id)) // Check both locations for ID
+                          .map(d => {
+                            const id = d.restaurant_id || d.restaurants?.id;
+                            const data = d.restaurants;
+                            return [id, data];
+                          })
+                      ).values()
+                    ).map((res: any) => {
+                      if (!res?.id) return null;
+                      return (
+                        <option key={res.id} value={res.id}>
+                          {res.name}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+
+                {/* Quantity Input and Action Buttons (The missing part) */}
+                <div className="flex gap-1 items-center">
+                  <input 
+                    type="number" 
+                    value={qtyMap[item.id] || ''} 
+                    onChange={(e) => setQtyMap({...qtyMap, [item.id]: e.target.value})} 
+                    onKeyDown={(e) => { if (e.key === '-') e.preventDefault(); }} 
+                    className="border w-full p-2 text-center rounded-lg font-bold outline-blue-500 text-black" 
+                    min="1" 
+                    placeholder="Qty" 
+                  />
+                  <button 
+                    onClick={() => updateStock(item.id, Math.abs(Number(qtyMap[item.id])), destMap[item.id])} 
+                    className="bg-green-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-green-600"
+                  >
+                    IN
                   </button>
-                )}
+                  <button 
+                    onClick={() => updateStock(item.id, -Math.abs(Number(qtyMap[item.id])), destMap[item.id])} 
+                    className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-600"
+                  >
+                    OUT
+                  </button>
+                  
+                  {(profile?.role === 'super-admin' || ['aplus', 'harsa', 'titanium'].includes(profile?.username)) && (
+                    <button 
+                      onClick={() => adjustStock(item.id, qtyMap[item.id])} 
+                      className="bg-amber-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-amber-600"
+                    >
+                      ADJ
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           ))}
@@ -721,6 +782,7 @@ async function handleAdminPasswordChange() {
               // Look for our renamed 'author' field or the default 'profiles'
               const profileData = t.author || (Array.isArray(t.profiles) ? t.profiles[0] : t.profiles);
               const displayUser = profileData?.username || 'System';
+              const destName = t.destination?.name;
 
               return (
                 <div key={t.id} className="text-sm p-4 border-b last:border-0 flex justify-between items-center hover:bg-gray-50">
@@ -732,6 +794,12 @@ async function handleAdminPasswordChange() {
                       <span className="text-[9px] font-black bg-blue-50 text-blue-500 px-1.5 py-0.5 rounded uppercase border border-blue-100">
                         👤 {displayUser}
                       </span>
+                      {/* NEW: Destination Badge (Only shows if destination_id exists) */}
+                      {destName && (
+                        <span className="text-[9px] font-black bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded uppercase border border-purple-100">
+                          📍 TO: {destName}
+                        </span>
+                      )}
                     </div>
                   </div>
                   
@@ -740,7 +808,11 @@ async function handleAdminPasswordChange() {
                     t.type === 'adjustment' ? 'bg-amber-100 text-amber-700' : 
                     'bg-red-100 text-red-700'
                   }`}>
-                    {t.type.toUpperCase()} {t.qty > 0 ? `+${t.qty}` : t.qty}
+                    {t.type.toUpperCase()} {' '}
+                    {t.type === 'adjustment' 
+                      ? (t.qty - t.prev_qty > 0 ? `+${t.qty - t.prev_qty}` : t.qty - t.prev_qty)
+                      : (t.qty > 0 ? `+${t.qty}` : t.qty)
+                    }
                   </span>
                 </div>
               );
