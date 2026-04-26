@@ -10,6 +10,7 @@ export default function Home() {
   const [targetUserId, setTargetUserId] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [adminMsg, setAdminMsg] = useState('')
+  const [allRestaurants, setAllRestaurants] = useState<any[]>([]);
   // --- AUTH & USER STATE ---
   const [user, setUser] = useState<any>(null)
   const [profile, setProfile] = useState<any>(null)
@@ -88,66 +89,77 @@ async function handleLogin() {
   }
 
  async function checkUser() {
-    try {
-      // Use getSession first, it's faster for checking local auth state
-      const { data: { session } } = await supabase.auth.getSession();
-      const currentUser = session?.user;
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    const currentUser = session?.user;
 
-      if (!currentUser) {
-        setUser(null);
-        return null;
-      }
-
-      setUser(currentUser);
-
-      const { data: prof, error: profError } = await supabase
-        .from('profiles')
-        .select('*, restaurants(name)')
-        .eq('id', currentUser.id)
-        .single();
-      
-      if (profError) throw profError;
-      
-      setProfile(prof);
-
-      // Fetch divisions
-      let divQuery = supabase
-        .from('divisions')
-        .select(`
-          id, 
-          name, 
-          restaurant_id, 
-          restaurants (
-            id,
-            name
-          )
-        `);      
-      if (prof?.division_id) {
-        divQuery = divQuery.eq('id', prof.division_id);
-      } else if (prof?.role !== 'super-admin' && prof?.restaurant_id) {
-        divQuery = divQuery.eq('restaurant_id', prof.restaurant_id);
-      }
-
-      const { data: divs } = await divQuery;
-      const availableDivs = divs || [];
-      setAllDivisions(availableDivs);
-      
-      // Set default selection
-      if (availableDivs.length === 1) {
-        setSelectedDivision(availableDivs[0].id);
-      } else if (prof?.role !== 'super-admin' && availableDivs.length > 0) {
-        setSelectedDivision(availableDivs[0].id);
-      } else {
-        setSelectedDivision('all');
-      }
-      
-      return prof;
-    } catch (err) {
-      console.error("Auth System Error:", err);
+    if (!currentUser) {
       setUser(null);
       return null;
     }
+
+    setUser(currentUser);
+
+    const { data: prof, error: profError } = await supabase
+      .from('profiles')
+      .select('*, restaurants(name)')
+      .eq('id', currentUser.id)
+      .single();
+    
+    if (profError) throw profError;
+    
+    setProfile(prof);
+
+    // --- 1. FETCH ALL RESTAURANTS (Moved here so it actually runs) ---
+    const { data: globalRestaurants } = await supabase
+      .from('restaurants')
+      .select('id, name')
+      .order('name');
+
+    if (globalRestaurants) {
+      setAllRestaurants(globalRestaurants);
+    }
+
+    // --- 2. FETCH DIVISIONS ---
+    let divQuery = supabase
+      .from('divisions')
+      .select(`
+        id, 
+        name, 
+        restaurant_id, 
+        restaurants (
+          id,
+          name
+        )
+      `);      
+    
+    if (prof?.division_id) {
+      divQuery = divQuery.eq('id', prof.division_id);
+    } else if (prof?.role !== 'super-admin' && prof?.restaurant_id) {
+      divQuery = divQuery.eq('restaurant_id', prof.restaurant_id);
+    }
+
+    const { data: divs } = await divQuery;
+    const availableDivs = divs || [];
+    setAllDivisions(availableDivs);
+    
+    if (availableDivs.length === 1) {
+      setSelectedDivision(availableDivs[0].id);
+    } else if (prof?.role !== 'super-admin' && availableDivs.length > 0) {
+      setSelectedDivision(availableDivs[0].id);
+    } else {
+      setSelectedDivision('all');
+    }
+    
+    // THE FUNCTION ENDS HERE
+    return prof; 
+
+  } catch (err) {
+    console.error("Auth System Error:", err);
+    setUser(null);
+    return null;
   }
+}
     async function fetchItems() {
     // 1. Safety Gate: Don't run if profile or divisions aren't loaded yet
     if (!profile || (profile.role !== 'super-admin' && allDivisions.length === 0)) {
@@ -692,24 +704,11 @@ async function handleAdminPasswordChange() {
                     className="text-[10px] p-1 bg-white border rounded border-gray-200 outline-blue-500 font-bold text-gray-700"
                   >
                     <option value="">-- Select Destination --</option>
-                    {allDivisions && Array.from(
-                      new Map(
-                        allDivisions
-                          .filter(d => d && (d.restaurant_id || d.restaurants?.id)) // Check both locations for ID
-                          .map(d => {
-                            const id = d.restaurant_id || d.restaurants?.id;
-                            const data = d.restaurants;
-                            return [id, data];
-                          })
-                      ).values()
-                    ).map((res: any) => {
-                      if (!res?.id) return null;
-                      return (
-                        <option key={res.id} value={res.id}>
-                          {res.name}
-                        </option>
-                      );
-                    })}
+                    {allRestaurants.map((res: any) => (
+                      <option key={res.id} value={res.id}>
+                        {res.name}
+                      </option>
+                    ))}
                   </select>
                 </div>
 
