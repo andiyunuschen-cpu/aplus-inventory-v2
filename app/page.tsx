@@ -736,7 +736,7 @@ async function handleAdminPasswordChange() {
                     OUT
                   </button>
                   
-                  {(profile?.role === 'super-admin' || ['aplus', 'harsa', 'titanium'].includes(profile?.username)) && (
+                  {(profile?.role === 'super-admin' || ['aplus', 'harsa', 'titanium','april'].includes(profile?.username)) && (
                     <button 
                       onClick={() => adjustStock(item.id, qtyMap[item.id])} 
                       className="bg-amber-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-amber-600"
