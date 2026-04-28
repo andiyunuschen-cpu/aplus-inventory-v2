@@ -526,8 +526,8 @@ async function handleAdminPasswordChange() {
              <p className="text-gray-400 text-sm">Inventory System</p>
           </div>
           <div className="flex flex-col gap-4">
-            <input type="text" placeholder="Username" value={username} onChange={(e) => setUsername(e.target.value)} className="border p-2 rounded text-black outline-blue-500" />
-            <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} className="border p-2 rounded text-black outline-blue-500" />
+            <input type="text" placeholder="Username" value={username} onChange={(e) => setUsername(e.target.value.toLowerCase())} className="border p-2 rounded text-black outline-blue-500" onKeyDown={(e) => e.key === 'Enter' && handleLogin()} />
+            <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} className="border p-2 rounded text-black outline-blue-500" onKeyDown={(e) => e.key === 'Enter' && handleLogin()}/>
             <button onClick={handleLogin} className="bg-blue-600 text-white py-2 rounded font-bold hover:bg-blue-700">Login</button>
           </div>
         </div>
