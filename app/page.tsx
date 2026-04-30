@@ -381,19 +381,19 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
     
     // 2. PREPARE THE QUERY
     let transQuery = supabase
-      .from('transactions')
-      .select(`
-        qty, 
-        prev_qty, 
-        type, 
-        created_at, 
-        item_id, 
-        items!inner(name, division_id, divisions(name, restaurants(name))),
-        author:profiles!profile_id ( username )
-      `)
-      .gte('created_at', startDate)
-      .lt('created_at', endDate);
-
+    .from('transactions')
+    .select(`
+      qty, 
+      prev_qty, 
+      type, 
+      created_at, 
+      item_id, 
+      items!inner(name, unit, division_id, divisions(name, restaurants(name))),
+      author:profiles!profile_id ( username ),
+      destination:restaurants!destination_id ( name ) 
+    `)
+    .gte('created_at', startDate)
+    .lt('created_at', endDate);
     // 3. APPLY DIVISION FILTER (This fixes the "Mixed Divisions" issue)
     if (selectedDivision !== 'all') {
       transQuery = transQuery.eq('items.division_id', selectedDivision);
@@ -470,7 +470,53 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
         finalResult
       ]);
     });
+    // --- TAB 3: DAILY MOVEMENT LOG ---
+    const moveSheet = workbook.addWorksheet('Daily Movement');
 
+    // 1. Add Header Info
+    moveSheet.addRow([`DETAILED MOVEMENT LOG: ${currentDivName} (${month})`]);
+    moveSheet.mergeCells(1, 1, 1, 6); 
+    moveSheet.getRow(1).font = { bold: true, size: 14 };
+
+    // 2. Add Table Headers (matching your screenshot)
+    const moveHeader = ['Date and time', 'Item Name', 'Movement', 'Qty', 'Unit', 'Destination'];
+    moveSheet.addRow(moveHeader);
+    moveSheet.getRow(2).font = { bold: true };
+    moveSheet.getRow(2).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' } // Light grey background
+    };
+
+    // 3. Filter and Sort Transactions (Excluding adjustments, or keep them if you like)
+    const movements = transData?.filter(t => t.type === 'in' || t.type === 'out') || [];
+
+    movements.forEach((m: any) => {
+      const itemRef = Array.isArray(m.items) ? m.items[0] : m.items;
+      
+      moveSheet.addRow([
+        new Date(m.created_at).toLocaleString('en-GB', { 
+          day: '2-digit', month: '2-digit', year: 'numeric', 
+          hour: '2-digit', minute: '2-digit', second: '2-digit', 
+          hour12: true 
+        }).toUpperCase(), // Formats as 01-05-2026 (01:30:45 PM)
+        itemRef?.name || 'Unknown',
+        m.type === 'in' ? 'In' : 'Out',
+        Math.abs(m.qty),
+        itemRef?.unit || '-',
+        m.destination?.name || '-' // This is your "📍 TO:" restaurant
+      ]);
+    });
+
+    // 4. Set Column Widths for readability
+    moveSheet.columns = [
+      { width: 25 }, // Date
+      { width: 20 }, // Item
+      { width: 12 }, // Movement
+      { width: 8 },  // Qty
+      { width: 10 }, // Unit
+      { width: 25 }  // Destination
+    ];
     // Final formatting and save
     workbook.worksheets.forEach(sheet => {
       sheet.eachRow({ includeEmpty: false }, (row) => {
