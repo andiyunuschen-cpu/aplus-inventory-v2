@@ -187,47 +187,51 @@ async function handleLogin() {
     }
   }
 
-  async function fetchTransactions() {
-    // 1. If not logged in or profile not ready, stop.
-   if (!user || !profile) return;
-      let query = supabase
-      .from('transactions')
-      .select(`
-        id, 
-        qty, 
-        prev_qty,
-        type, 
-        created_at, 
-        item_id, 
-        items!inner ( name, unit, division_id ),
-        author:profiles!profile_id ( username ),
-        destination:restaurants!destination_id ( name )
-      `)
-      .order('created_at', { ascending: false })
-      .limit(30);
-    // 2. Filter Logic
-    if (selectedDivision !== 'all') {
-      query = query.eq('items.division_id', selectedDivision);
-    } else if (profile.role !== 'super-admin') {
-      // If Global View is selected but user is STAFF, 
-      // we must ensure authorizedIds is NOT empty.
-      const authorizedIds = allDivisions.map(d => d.id);
-      
-      if (authorizedIds.length > 0) {
-        query = query.in('items.division_id', authorizedIds);
-      } else {
-        // If we don't have division IDs yet, don't query (avoids 0 results)
-        return;
-      }
-    }
+  // Add 'search' as a parameter so it can be passed from the UI
+async function fetchTransactions(search = '') {
+  if (!user || !profile) return;
 
-    const { data, error } = await query;
-    if (error) {
-      console.error("Transaction Fetch Error:", error.message);
+  let query = supabase
+    .from('transactions')
+    .select(`
+      id, 
+      qty, 
+      prev_qty,
+      type, 
+      created_at, 
+      item_id, 
+      items!inner ( name, unit, division_id ),
+      author:profiles!profile_id ( username ),
+      destination:restaurants!destination_id ( name )
+    `)
+    .order('created_at', { ascending: false })
+    .limit(30);
+
+  // 1. NEW: Item Name Search Filter
+  // This searches the database for the item name before the limit is applied
+  if (search) {
+    query = query.ilike('items.name', `%${search}%`);
+  }
+
+  // 2. Division Filter Logic (Your existing code)
+  if (selectedDivision !== 'all') {
+    query = query.eq('items.division_id', selectedDivision);
+  } else if (profile.role !== 'super-admin') {
+    const authorizedIds = allDivisions.map(d => d.id);
+    if (authorizedIds.length > 0) {
+      query = query.in('items.division_id', authorizedIds);
     } else {
-      setTransactions(data || []);
+      return;
     }
   }
+
+  const { data, error } = await query;
+  if (error) {
+    console.error("Transaction Fetch Error:", error.message);
+  } else {
+    setTransactions(data || []);
+  }
+}
 
   // 3. REFRESH DATA ON DROPDOWN CHANGE
   // This ensures that when you switch from "Global" to a specific branch, it re-fetches
@@ -555,8 +559,7 @@ async function handleAdminPasswordChange() {
 
 
 //----UI Starts Here--
-
-  if (loading) return (
+if (loading) return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 text-gray-400">
         <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mb-4"></div>
         <p className="font-bold text-sm">LOADING APLUS CONTROL...</p>
@@ -617,7 +620,6 @@ async function handleAdminPasswordChange() {
                 value={selectedDivision}
                 onChange={(e) => setSelectedDivision(e.target.value)}
               >
-                {/* Only Super Admin can see 'Global View' */}
                 {profile?.role === 'super-admin' && <option value="all">🌐 GLOBAL VIEW (All Branches)</option>}
                 
                 {allDivisions.map((div) => (
@@ -630,7 +632,16 @@ async function handleAdminPasswordChange() {
 
             <div className="flex-1 min-w-[150px]">
               <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">Search</label>
-              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search..." className="w-full border p-2.5 rounded-lg text-sm bg-gray-50 outline-blue-500 text-black" />
+              <input 
+                value={search} 
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setSearch(val);
+                  fetchTransactions(val); // Trigger database search on change
+                }} 
+                placeholder="Search..." 
+                className="w-full border p-2.5 rounded-lg text-sm bg-gray-50 outline-blue-500 text-black" 
+              />
             </div>
           <button 
             onClick={() => setShowEmptyOnly(!showEmptyOnly)}
@@ -657,14 +668,8 @@ async function handleAdminPasswordChange() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
           {items
             .filter((i: any) => {
-              // 1. First, apply the Search filter
               const matchesSearch = i.name.toLowerCase().includes(search.toLowerCase());
-              
-              // 2. Second, apply the Out of Stock filter only if the button is active
-              // If showEmptyOnly is true, we only show items with 0 stock.
-              // If showEmptyOnly is false, we show everything.
               const matchesStock = showEmptyOnly ? i.stock <= 2 : true;
-
               return matchesSearch && matchesStock;
             })
             .map((item: any) => (
@@ -672,7 +677,6 @@ async function handleAdminPasswordChange() {
               <div className="flex justify-between items-start">
                 <div className="w-full">
                   {editingId === item.id ? (
-                    /* EDIT MODE: Show Input Boxes */
                     <div className="flex flex-col gap-2 mb-2">
                       <input 
                         className="border p-1 rounded text-sm font-bold w-full text-black outline-blue-500"
@@ -691,13 +695,11 @@ async function handleAdminPasswordChange() {
                       </div>
                     </div>
                   ) : (
-                    /* VIEW MODE: Show Text + Edit Button */
                     <div className="flex items-center gap-2">
                       <div className="font-bold text-gray-800 text-lg leading-tight uppercase">{item.name}</div>
                       
                       {profile?.role === 'super-admin' && (
                         <div className="flex gap-1">
-                          {/* EDIT BUTTON */}
                           <button 
                             onClick={() => {
                               setEditingId(item.id);
@@ -710,8 +712,6 @@ async function handleAdminPasswordChange() {
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                             </svg>
                           </button>
-
-                          {/* DELETE BUTTON */}
                           <button onClick={() => deleteItem(item.id, item.name)} className="text-red-300 hover:text-red-600 p-1 transition-colors">
                             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -722,15 +722,13 @@ async function handleAdminPasswordChange() {
                     </div>
                   )}
                   
-                  {/* Division Label - Inside the same div so it stays left-aligned */}
                   {editingId !== item.id && (
                     <div className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">
-                       {item.divisions?.restaurants?.name} — {item.divisions?.name}
+                        {item.divisions?.restaurants?.name} — {item.divisions?.name}
                     </div>
                   )}
                 </div>
 
-                {/* STOCK DISPLAY - Right Aligned */}
                 {editingId !== item.id && (
                   <div className="text-2xl font-black text-blue-600 ml-2">
                     {item.stock} <span className="text-xs font-normal text-gray-400">{item.unit}</span>
@@ -738,10 +736,7 @@ async function handleAdminPasswordChange() {
                 )}
               </div>
               
-            {/* Transaction Input Area */}
               <div className="flex flex-col gap-2 bg-gray-50 p-2 rounded-lg mt-auto">
-                
-                {/* Destination Dropdown */}
                 <div className="flex flex-col px-1">
                   <label className="text-[9px] font-black text-gray-400 uppercase tracking-tighter">Destination</label>
                   <select 
@@ -758,7 +753,6 @@ async function handleAdminPasswordChange() {
                   </select>
                 </div>
 
-                {/* Quantity Input and Action Buttons (The missing part) */}
                 <div className="flex gap-1 items-center">
                   <input 
                     type="number" 
@@ -782,7 +776,6 @@ async function handleAdminPasswordChange() {
                     OUT
                   </button>
                   
-                  {/* Only show ADJ button for super-admins and managers */}
                   {(profile?.role === 'super-admin' || profile?.role === 'manager') && (
                     <button 
                       onClick={() => adjustStock(item.id, qtyMap[item.id])} 
@@ -803,29 +796,12 @@ async function handleAdminPasswordChange() {
           {search ? `Activity for "${search}"` : 'Recent Activity'}
         </h2>
         <div className="bg-white border rounded-2xl overflow-hidden shadow-sm">
-          {/* Filter transactions based on the search box */}
-          {transactions
-            .filter((t: any) => {
-              const itemRef = Array.isArray(t.items) ? t.items[0] : t.items;
-              return !search || itemRef?.name?.toLowerCase().includes(search.toLowerCase());
-            })
-            .length === 0 && (
+          {transactions.length === 0 && (
               <p className="p-8 text-center text-gray-400 text-sm italic">No matching transactions.</p>
-            )}
+          )}
 
-          {/* Map through the FILTERED list */}
-          {transactions
-            .filter((t: any) => {
+          {transactions.map((t: any) => {
               const itemRef = Array.isArray(t.items) ? t.items[0] : t.items;
-              return !search || itemRef?.name?.toLowerCase().includes(search.toLowerCase());
-            })
-            .map((t: any) => {
-              // DEBUG: Remove this once it works!
-              console.log("Transaction Data:", t);
-
-              const itemRef = Array.isArray(t.items) ? t.items[0] : t.items;
-              
-              // Look for our renamed 'author' field or the default 'profiles'
               const profileData = t.author || (Array.isArray(t.profiles) ? t.profiles[0] : t.profiles);
               const displayUser = profileData?.username || 'System';
               const destName = t.destination?.name;
@@ -840,7 +816,6 @@ async function handleAdminPasswordChange() {
                       <span className="text-[9px] font-black bg-blue-50 text-blue-500 px-1.5 py-0.5 rounded uppercase border border-blue-100">
                         👤 {displayUser}
                       </span>
-                      {/* NEW: Destination Badge (Only shows if destination_id exists) */}
                       {destName && (
                         <span className="text-[9px] font-black bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded uppercase border border-purple-100">
                           📍 TO: {destName}
