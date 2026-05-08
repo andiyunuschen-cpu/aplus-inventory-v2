@@ -31,6 +31,7 @@ export default function Home() {
   const [selectedDivision, setSelectedDivision] = useState<string>('all')
   const [allDivisions, setAllDivisions] = useState<any[]>([])
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingDestId, setEditingDestId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [editUnit, setEditUnit] = useState('');
   const [showEmptyOnly, setShowEmptyOnly] = useState(false);
@@ -197,22 +198,29 @@ async function fetchTransactions(search = '', isLoadMore = false) {
   const start = isLoadMore ? (page + 1) * pageSize : 0;
   const end = start + pageSize - 1;
 
+  // 1. Start the query
   let query = supabase
     .from('transactions')
     .select(`
-      id, qty, prev_qty, type, created_at, item_id, 
-      items!inner ( name, unit, division_id ),
+      id, qty, prev_qty, type, created_at, item_id, destination_id,
+      items!inner ( name, unit, division_id ), 
       author:profiles!profile_id ( username ),
       destination:restaurants!destination_id ( name )
     `)
     .order('created_at', { ascending: false })
-    .range(start, end); // Use range instead of limit
+    .range(start, end);
 
+  // 2. THE FIX: Filter by Division
+  // If "all" is selected (Super Admin), we don't filter by division.
+  // Otherwise, we force the query to only show items from that division.
+  if (selectedDivision !== 'all') {
+    query = query.eq('items.division_id', selectedDivision);
+  }
+
+  // 3. Apply Search if any
   if (search) {
     query = query.ilike('items.name', `%${search}%`);
   }
-
-  // ... (Your existing Division Filter Logic here) ...
 
   const { data, error } = await query;
 
@@ -222,10 +230,8 @@ async function fetchTransactions(search = '', isLoadMore = false) {
       setPage(prev => prev + 1);
     } else {
       setTransactions(data);
-      setPage(0); // Reset page on new search
+      setPage(0);
     }
-    
-    // If we got fewer than 30 results, there's no more data to load
     setHasMore(data.length === pageSize);
   }
 }
@@ -552,7 +558,24 @@ async function handleAdminPasswordChange() {
     setNewPassword(''); // Clear the input
   }
 }
+async function updateTransactionDestination(transactionId: any, newDestinationId: any) {
+  try {
+    const { error } = await supabase
+      .from('transactions')
+      .update({ destination_id: newDestinationId || null }) 
+      .eq('id', transactionId);
 
+    if (error) throw error;
+
+    // Refresh the feed
+    alert("Destination updated successfully");
+    fetchTransactions(search); 
+    setEditingDestId(null); // Close the selector after success
+  } catch (error: any) {
+    console.error("Error updating destination:", error.message);
+    alert("Failed to update destination: " + error.message);
+  }
+}
 
 
 //----UI Starts Here--
@@ -788,55 +811,85 @@ if (loading) return (
         </div>
       
       {/* Activity Feed */}
-      <div className="mt-10 mb-20">
-        <h2 className="text-sm font-black text-gray-400 uppercase tracking-widest mb-4">
-          {search ? `Activity for "${search}"` : 'Recent Activity'}
-        </h2>
-        <div className="bg-white border rounded-2xl overflow-hidden shadow-sm">
-          {transactions.length === 0 && (
-              <p className="p-8 text-center text-gray-400 text-sm italic">No matching transactions.</p>
-          )}
+        <div className="mt-10 mb-20">
+          <h2 className="text-sm font-black text-gray-400 uppercase tracking-widest mb-4">
+            {search ? `Activity for "${search}"` : 'Recent Activity'}
+          </h2>
+          <div className="bg-white border rounded-2xl overflow-hidden shadow-sm">
+            {transactions.length === 0 && (
+                <p className="p-8 text-center text-gray-400 text-sm italic">No matching transactions.</p>
+            )}
 
-          {transactions.map((t: any) => {
-              const itemRef = Array.isArray(t.items) ? t.items[0] : t.items;
-              const profileData = t.author || (Array.isArray(t.profiles) ? t.profiles[0] : t.profiles);
-              const displayUser = profileData?.username || 'System';
-              const destName = t.destination?.name;
+            {transactions.map((t: any) => {
+                const itemRef = Array.isArray(t.items) ? t.items[0] : t.items;
+                const profileData = t.author || (Array.isArray(t.profiles) ? t.profiles[0] : t.profiles);
+                const displayUser = profileData?.username || 'System';
+                const destName = t.destination?.name;
 
-              return (
-                <div key={t.id} className="text-sm p-4 border-b last:border-0 flex justify-between items-center hover:bg-gray-50">
-                  <div className="flex flex-col">
-                    <span className="font-bold text-gray-700">{itemRef?.name || 'Unknown Item'}</span>
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <span className="text-[10px] text-gray-400">{new Date(t.created_at).toLocaleString()}</span>
-                      
-                      <span className="text-[9px] font-black bg-blue-50 text-blue-500 px-1.5 py-0.5 rounded uppercase border border-blue-100">
-                        👤 {displayUser}
-                      </span>
-                      {destName && (
-                        <span className="text-[9px] font-black bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded uppercase border border-purple-100">
-                          📍 TO: {destName}
+                return (
+                  <div key={t.id} className="text-sm p-4 border-b last:border-0 flex justify-between items-center hover:bg-gray-50">
+                    <div className="flex flex-col">
+                      <span className="font-bold text-gray-700">{itemRef?.name || 'Unknown Item'}</span>
+                      <div className="flex flex-wrap items-center gap-2 mt-0.5">
+                        <span className="text-[10px] text-gray-400">{new Date(t.created_at).toLocaleString()}</span>
+                        
+                        <span className="text-[9px] font-black bg-blue-50 text-blue-500 px-1.5 py-0.5 rounded uppercase border border-blue-100">
+                          👤 {displayUser}
                         </span>
-                      )}
+
+                        {/* EDITABLE DESTINATION BADGE */}
+                        {editingDestId === t.id ? (
+                          <div className="flex items-center gap-1">
+                            <select 
+                              className="text-[9px] font-black border rounded bg-white p-0.5 outline-blue-500"
+                              value={t.destination_id || ""}
+                              onChange={(e) => updateTransactionDestination(t.id, e.target.value)}
+                            >
+                              <option value="">None</option>
+                              {allRestaurants.map((res: any) => (
+                                <option key={res.id} value={res.id}>
+                                  {res.name}
+                                </option>
+                              ))}
+                            </select>
+                            <button 
+                              onClick={() => setEditingDestId(null)} 
+                              className="text-[9px] text-gray-400 font-bold hover:text-red-500 ml-1"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ) : (
+                          <button 
+                            onClick={() => profile?.role === 'super-admin' && setEditingDestId(t.id)}
+                            className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase border transition-all ${
+                              destName 
+                              ? 'bg-purple-50 text-purple-600 border-purple-100 hover:bg-purple-100' 
+                              : 'bg-gray-50 text-gray-400 border-gray-100 hover:border-gray-300 italic'
+                            } ${profile?.role !== 'super-admin' && 'cursor-default'}`}
+                          >
+                            📍 TO: {destName || 'Set Destination'}
+                          </button>
+                        )}
+                      </div>
                     </div>
+                    
+                    <span className={`font-black px-3 py-1 rounded-full text-[10px] ${
+                      t.type === 'in' ? 'bg-green-100 text-green-700' : 
+                      t.type === 'adjustment' ? 'bg-amber-100 text-amber-700' : 
+                      'bg-red-100 text-red-700'
+                    }`}>
+                      {t.type.toUpperCase()} {' '}
+                      {t.type === 'adjustment' 
+                        ? (t.qty - t.prev_qty > 0 ? `+${t.qty - t.prev_qty}` : t.qty - t.prev_qty)
+                        : (t.qty > 0 ? `+${t.qty}` : t.qty)
+                      }
+                    </span>
                   </div>
-                  
-                  <span className={`font-black px-3 py-1 rounded-full text-[10px] ${
-                    t.type === 'in' ? 'bg-green-100 text-green-700' : 
-                    t.type === 'adjustment' ? 'bg-amber-100 text-amber-700' : 
-                    'bg-red-100 text-red-700'
-                  }`}>
-                    {t.type.toUpperCase()} {' '}
-                    {t.type === 'adjustment' 
-                      ? (t.qty - t.prev_qty > 0 ? `+${t.qty - t.prev_qty}` : t.qty - t.prev_qty)
-                      : (t.qty > 0 ? `+${t.qty}` : t.qty)
-                    }
-                  </span>
-                </div>
-              );
-            })}
+                );
+              })}
+          </div>
         </div>
-      </div>
       {hasMore && transactions.length > 0 && (
         <div className="p-4 border-t bg-gray-50 flex justify-center">
           <button 
