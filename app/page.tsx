@@ -35,6 +35,8 @@ export default function Home() {
   const [editUnit, setEditUnit] = useState('');
   const [showEmptyOnly, setShowEmptyOnly] = useState(false);
   const [destMap, setDestMap] = useState<{ [key: string]: string }>({});
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
   // 1. Initial Load
  // 1. IMPROVED BOOT SEQUENCE
   useEffect(() => {
@@ -188,48 +190,43 @@ async function handleLogin() {
   }
 
   // Add 'search' as a parameter so it can be passed from the UI
-async function fetchTransactions(search = '') {
+async function fetchTransactions(search = '', isLoadMore = false) {
   if (!user || !profile) return;
+
+  const pageSize = 30;
+  const start = isLoadMore ? (page + 1) * pageSize : 0;
+  const end = start + pageSize - 1;
 
   let query = supabase
     .from('transactions')
     .select(`
-      id, 
-      qty, 
-      prev_qty,
-      type, 
-      created_at, 
-      item_id, 
+      id, qty, prev_qty, type, created_at, item_id, 
       items!inner ( name, unit, division_id ),
       author:profiles!profile_id ( username ),
       destination:restaurants!destination_id ( name )
     `)
     .order('created_at', { ascending: false })
-    .limit(30);
+    .range(start, end); // Use range instead of limit
 
-  // 1. NEW: Item Name Search Filter
-  // This searches the database for the item name before the limit is applied
   if (search) {
     query = query.ilike('items.name', `%${search}%`);
   }
 
-  // 2. Division Filter Logic (Your existing code)
-  if (selectedDivision !== 'all') {
-    query = query.eq('items.division_id', selectedDivision);
-  } else if (profile.role !== 'super-admin') {
-    const authorizedIds = allDivisions.map(d => d.id);
-    if (authorizedIds.length > 0) {
-      query = query.in('items.division_id', authorizedIds);
-    } else {
-      return;
-    }
-  }
+  // ... (Your existing Division Filter Logic here) ...
 
   const { data, error } = await query;
-  if (error) {
-    console.error("Transaction Fetch Error:", error.message);
-  } else {
-    setTransactions(data || []);
+
+  if (!error && data) {
+    if (isLoadMore) {
+      setTransactions(prev => [...prev, ...data]);
+      setPage(prev => prev + 1);
+    } else {
+      setTransactions(data);
+      setPage(0); // Reset page on new search
+    }
+    
+    // If we got fewer than 30 results, there's no more data to load
+    setHasMore(data.length === pageSize);
   }
 }
 
@@ -840,6 +837,22 @@ if (loading) return (
             })}
         </div>
       </div>
+      {hasMore && transactions.length > 0 && (
+        <div className="p-4 border-t bg-gray-50 flex justify-center">
+          <button 
+            onClick={() => fetchTransactions(search, true)}
+            className="text-xs font-bold text-blue-600 hover:text-blue-800 uppercase tracking-widest py-2 px-6 border border-blue-200 rounded-full bg-white shadow-sm"
+          >
+            Load 30 More Transactions
+          </button>
+        </div>
+      )}
+
+      {!hasMore && transactions.length > 0 && (
+        <div className="p-4 text-center text-gray-400 text-[10px] uppercase font-bold">
+          End of transaction history
+        </div>
+      )}
     </div>
   )
 }
