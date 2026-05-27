@@ -626,8 +626,11 @@ if (loading) return (
           <div className="lg:col-span-4">
             <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">Quick Add Item</label>
             <div className="flex gap-2">
-              <input value={newItem} onChange={(e) => setNewItem(e.target.value)} placeholder="Name" className="border p-2.5 rounded-lg flex-1 text-sm bg-gray-50 outline-blue-500 text-black" />
-              <input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="Unit" className="border p-2.5 rounded-lg w-20 text-sm bg-gray-50 outline-blue-500 text-black" />
+              <input value={newItem} onChange={(e) => setNewItem(e.target.value)} placeholder={profile?.role === 'managerharsa' ? "Locked" : "Name"} disabled={profile?.role === 'managerharsa'} // Lock input for staff 
+                className="border p-2.5 rounded-lg flex-1 text-sm bg-gray-50 outline-blue-500 text-black" />
+              <input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="Unit" 
+              disabled={profile?.role === 'managerharsa'} // Lock input for staff 
+              className="border p-2.5 rounded-lg w-20 text-sm bg-gray-50 outline-blue-500 text-black" />
               <button onClick={addNewItem} className="bg-blue-600 text-white px-4 py-2.5 rounded-lg font-bold text-sm">Add</button>
             </div>
           </div>
