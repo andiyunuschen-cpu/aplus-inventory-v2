@@ -38,6 +38,8 @@ export default function Home() {
   const [destMap, setDestMap] = useState<{ [key: string]: string }>({});
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
+  const [editingDateId, setEditingDateId] = useState<string | null>(null);
+  const [editDateValue, setEditDateValue] = useState<string>('');
   // 1. Initial Load
  // 1. IMPROVED BOOT SEQUENCE
   useEffect(() => {
@@ -576,7 +578,31 @@ async function updateTransactionDestination(transactionId: any, newDestinationId
     alert("Failed to update destination: " + error.message);
   }
 }
+async function updateTransactionDate(transactionId: any, newDateString: string) {
+  // Security check: Only allow super-admin (or add 'admin' if you use that role too)
+  if (profile?.role !== 'super-admin') {
+    alert("Access Denied: Only administrators can edit transaction timestamps.");
+    return;
+  }
 
+  try {
+    // Convert the local datetime string back to standard ISO format for Supabase
+    const isoDate = new Date(newDateString).toISOString();
+
+    const { error } = await supabase
+      .from('transactions')
+      .update({ created_at: isoDate }) 
+      .eq('id', transactionId);
+
+    if (error) throw error;
+
+    fetchTransactions(search); 
+    setEditingDateId(null); 
+  } catch (error: any) {
+    console.error("Error updating date:", error.message);
+    alert("Failed to update date: " + error.message);
+  }
+}
 
 //----UI Starts Here--
 if (loading) return (
@@ -834,7 +860,53 @@ if (loading) return (
                     <div className="flex flex-col">
                       <span className="font-bold text-gray-700">{itemRef?.name || 'Unknown Item'}</span>
                       <div className="flex flex-wrap items-center gap-2 mt-0.5">
-                        <span className="text-[10px] text-gray-400">{new Date(t.created_at).toLocaleString()}</span>
+                        {/* EDITABLE DATE/TIME */}
+                      {editingDateId === t.id ? (
+                        <div className="flex items-center gap-1">
+                          <input 
+                            type="datetime-local" 
+                            className="text-[9px] border p-0.5 rounded outline-blue-500 text-black font-bold"
+                            value={editDateValue}
+                            onChange={(e) => setEditDateValue(e.target.value)}
+                          />
+                          <button 
+                            onClick={() => updateTransactionDate(t.id, editDateValue)}
+                            className="text-[9px] bg-blue-500 hover:bg-blue-600 text-white px-1.5 py-0.5 rounded font-bold transition-colors"
+                          >
+                            Save
+                          </button>
+                          <button 
+                            onClick={() => setEditingDateId(null)} 
+                            className="text-[9px] text-gray-400 font-bold hover:text-red-500 ml-1"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <span 
+                          onClick={() => {
+                            if (profile?.role === 'super-admin') {
+                              setEditingDateId(t.id);
+                              
+                              // This math formats the database UTC time into your local timezone 
+                              // so the HTML datetime-local input can read it correctly
+                              const dateObj = new Date(t.created_at);
+                              const tzOffset = dateObj.getTimezoneOffset() * 60000;
+                              const localISOTime = (new Date(dateObj.getTime() - tzOffset)).toISOString().slice(0, 16);
+                              
+                              setEditDateValue(localISOTime);
+                            }
+                          }}
+                          className={`text-[10px] transition-all ${
+                            profile?.role === 'super-admin' 
+                              ? 'text-blue-500 cursor-pointer hover:text-blue-700 hover:underline border-b border-dashed border-blue-200' 
+                              : 'text-gray-400'
+                          }`}
+                          title={profile?.role === 'super-admin' ? "Click to edit date and time" : ""}
+                        >
+                          {new Date(t.created_at).toLocaleString()}
+                        </span>
+                      )}
                         
                         <span className="text-[9px] font-black bg-blue-50 text-blue-500 px-1.5 py-0.5 rounded uppercase border border-blue-100">
                           👤 {displayUser}
