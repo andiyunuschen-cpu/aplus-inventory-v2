@@ -40,6 +40,8 @@ export default function Home() {
   const [hasMore, setHasMore] = useState(true);
   const [editingDateId, setEditingDateId] = useState<string | null>(null);
   const [editDateValue, setEditDateValue] = useState<string>('');
+  const [editingQtyId, setEditingQtyId] = useState<string | null>(null);
+  const [editQtyValue, setEditQtyValue] = useState<string>('');
   // 1. Initial Load
  // 1. IMPROVED BOOT SEQUENCE
   useEffect(() => {
@@ -603,7 +605,65 @@ async function updateTransactionDate(transactionId: any, newDateString: string) 
     alert("Failed to update date: " + error.message);
   }
 }
+async function updateTransactionQty(transaction: any, newValueStr: string) {
+  // Security check: Only Admins
+  if (profile?.role !== 'super-admin') {
+    alert("Access Denied: Only administrators can edit quantities.");
+    return;
+  }
 
+  const newQty = Number(newValueStr);
+  if (isNaN(newQty)) return;
+
+  // The math: Difference between what it SHOULD be vs what it WAS
+  const oldQty = transaction.qty;
+  const delta = newQty - oldQty;
+
+  // If nothing changed, just close the editor
+  if (delta === 0) {
+    setEditingQtyId(null);
+    return;
+  }
+
+  try {
+    // 1. Fetch the absolute latest stock for this item to avoid sync errors
+    const { data: itemData, error: itemError } = await supabase
+      .from('items')
+      .select('stock')
+      .eq('id', transaction.item_id)
+      .single();
+
+    if (itemError) throw itemError;
+
+    const newStock = itemData.stock + delta;
+
+    // 2. Update the master Item stock
+    const { error: updateItemError } = await supabase
+      .from('items')
+      .update({ stock: newStock })
+      .eq('id', transaction.item_id);
+
+    if (updateItemError) throw updateItemError;
+
+    // 3. Update the Transaction record
+    const { error: updateTxError } = await supabase
+      .from('transactions')
+      .update({ qty: newQty })
+      .eq('id', transaction.id);
+
+    if (updateTxError) throw updateTxError;
+
+    // Refresh the feed
+    fetchTransactions(search); 
+    setEditingQtyId(null);
+    
+    alert("Quantity updated! Note: You may need to refresh the page to see the updated stock in the top item cards.");
+
+  } catch (error: any) {
+    console.error("Error updating quantity:", error.message);
+    alert("Failed to update quantity: " + error.message);
+  }
+}
 //----UI Starts Here--
 if (loading) return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 text-gray-400">
@@ -949,17 +1009,52 @@ if (loading) return (
                       </div>
                     </div>
                     
-                    <span className={`font-black px-3 py-1 rounded-full text-[10px] ${
-                      t.type === 'in' ? 'bg-green-100 text-green-700' : 
-                      t.type === 'adjustment' ? 'bg-amber-100 text-amber-700' : 
-                      'bg-red-100 text-red-700'
-                    }`}>
-                      {t.type.toUpperCase()} {' '}
-                      {t.type === 'adjustment' 
-                        ? (t.qty - t.prev_qty > 0 ? `+${t.qty - t.prev_qty}` : t.qty - t.prev_qty)
-                        : (t.qty > 0 ? `+${t.qty}` : t.qty)
-                      }
-                    </span>
+                    {/* EDITABLE QUANTITY BADGE */}
+                    {editingQtyId === t.id ? (
+                      <div className="flex items-center gap-1">
+                        <input 
+                          type="number" 
+                          className="w-16 text-[10px] font-black border border-blue-300 rounded p-1 outline-blue-500 text-center text-black"
+                          value={editQtyValue}
+                          onChange={(e) => setEditQtyValue(e.target.value)}
+                        />
+                        <button 
+                          onClick={() => updateTransactionQty(t, editQtyValue)}
+                          className="text-[9px] bg-blue-500 hover:bg-blue-600 text-white px-2 py-1 rounded font-bold transition-colors"
+                        >
+                          Save
+                        </button>
+                        <button 
+                          onClick={() => setEditingQtyId(null)} 
+                          className="text-[9px] text-gray-400 font-bold hover:text-red-500 ml-1"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ) : (
+                      <span 
+                        onClick={() => {
+                          if (profile?.role === 'super-admin') {
+                            setEditingQtyId(t.id);
+                            setEditQtyValue(t.qty.toString());
+                          }
+                        }}
+                        className={`font-black px-3 py-1 rounded-full text-[10px] transition-all border border-transparent ${
+                          profile?.role === 'super-admin' ? 'cursor-pointer hover:border-current hover:opacity-80' : ''
+                        } ${
+                          t.type === 'in' ? 'bg-green-100 text-green-700' : 
+                          t.type === 'adjustment' ? 'bg-amber-100 text-amber-700' : 
+                          'bg-red-100 text-red-700'
+                        }`}
+                        title={profile?.role === 'super-admin' ? "Click to edit quantity" : ""}
+                      >
+                        {t.type.toUpperCase()} {' '}
+                        {t.type === 'adjustment' 
+                          ? (t.qty - t.prev_qty > 0 ? `+${t.qty - t.prev_qty}` : t.qty - t.prev_qty)
+                          : (t.qty > 0 ? `+${t.qty}` : t.qty)
+                        }
+                      </span>
+                    )}
                   </div>
                 );
               })}
