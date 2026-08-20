@@ -399,6 +399,7 @@ async function exportReport() {
         type, 
         created_at, 
         item_id, 
+        destination_id,
         items!inner(name, unit, division_id, divisions(name, restaurants(name))),
         author:profiles!profile_id ( username ),
         destination:restaurants!destination_id ( name ) 
@@ -427,10 +428,9 @@ async function exportReport() {
     const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
     
     worksheet.addRow([`INVENTORY REPORT: ${currentDivName} (${month})`]);
-    worksheet.mergeCells(1, 1, 1, 9); // Updated merge width for 9 summary columns
+    worksheet.mergeCells(1, 1, 1, 9);
     worksheet.getRow(1).font = { bold: true, size: 14 };
 
-    // Summary headers including Adjustment Qty
     const headerRow2 = ['No', 'Item Name', 'Restaurant', 'Division', 'Initial', 'Total In', 'Total Out', 'Adjustment Qty', 'Final'];
     const headerRow3 = ['', '', '', '', '', '', '', '', ''];
 
@@ -444,12 +444,10 @@ async function exportReport() {
     worksheet.addRow(headerRow3);
 
     items.forEach((item, index) => {
-      // Get all transactions for this item from startDate until TODAY
       const itemAllTrans = (allTransData || [])
         .filter(t => t.item_id === item.id)
-        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()); // Newest first
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-      // Step 1: Rewind current live stock back to the 1st of the selected month
       let initialStock = item.stock;
       itemAllTrans.forEach(t => {
         if (t.type === 'in') {
@@ -461,12 +459,10 @@ async function exportReport() {
         }
       });
 
-      // Step 2: Get transactions within the selected month (oldest first)
       const itemMonthTrans = itemAllTrans
         .filter(t => t.created_at < endDate)
         .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
-      // Step 3: Calculate Total In, Total Out, Total Adjustments, and Final Stock
       let finalStock = initialStock;
       let totalIn = 0;
       let totalOut = 0;
@@ -480,7 +476,7 @@ async function exportReport() {
           finalStock -= Math.abs(t.qty);
           totalOut += Math.abs(t.qty);
         } else if (t.type === 'adjustment') {
-          const adjDiff = t.qty - (t.prev_qty || 0); // Calculate net adjustment impact
+          const adjDiff = t.qty - (t.prev_qty || 0);
           totalAdj += adjDiff;
           finalStock = t.qty;
         }
@@ -494,11 +490,10 @@ async function exportReport() {
         initialStock, 
         totalIn,   
         totalOut,  
-        totalAdj, // <--- Net Adjustment Column
+        totalAdj,
         finalStock
       ];
 
-      // Step 4: Populate Daily In / Out Matrix
       for (let d = 1; d <= daysInMonth; d++) {
         const dayIn = monthTransData
           .filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && t.type === 'in')
@@ -584,7 +579,65 @@ async function exportReport() {
       { width: 25 }
     ];
 
-    // Final formatting and save
+    // --- TAB 4: RESTAURANT OUT BREAKDOWN ---
+    const restSheet = workbook.addWorksheet('Restaurant Summary');
+
+    restSheet.addRow([`RESTAURANT OUT BREAKDOWN: ${currentDivName} (${month})`]);
+    restSheet.mergeCells(1, 1, 1, 5 + allRestaurants.length); 
+    restSheet.getRow(1).font = { bold: true, size: 14 };
+
+    // Build Table Headers dynamically based on registered restaurants
+    const restHeader = ['No', 'Item Name', 'Division', 'Unit'];
+    allRestaurants.forEach((res: any) => {
+      restHeader.push(`📍 ${res.name}`);
+    });
+    restHeader.push('Unspecified / None', 'Total Sent');
+
+    restSheet.addRow(restHeader);
+    restSheet.getRow(2).font = { bold: true };
+    restSheet.getRow(2).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' }
+    };
+
+    items.forEach((item, index) => {
+      // Filter OUT movements for this specific item in the selected month
+      const itemOuts = monthTransData.filter(t => t.item_id === item.id && t.type === 'out');
+
+      const rowData: any[] = [
+        index + 1,
+        item.name,
+        item.divisions?.name || '-',
+        item.unit || '-'
+      ];
+
+      let rowTotalOut = 0;
+
+      // Calculate quantity sent to each restaurant branch
+      allRestaurants.forEach((res: any) => {
+        const qtyToRes = itemOuts
+          .filter(t => t.destination_id === res.id)
+          .reduce((sum, t) => sum + Math.abs(t.qty), 0);
+
+        rowData.push(qtyToRes);
+        rowTotalOut += qtyToRes;
+      });
+
+      // Calculate OUT quantity with no destination assigned
+      const unassignedQty = itemOuts
+        .filter(t => !t.destination_id)
+        .reduce((sum, t) => sum + Math.abs(t.qty), 0);
+
+      rowData.push(unassignedQty);
+      rowTotalOut += unassignedQty;
+
+      rowData.push(rowTotalOut);
+
+      restSheet.addRow(rowData);
+    });
+
+    // Auto-apply thin borders to all non-empty cells across all sheets
     workbook.worksheets.forEach(sheet => {
       sheet.eachRow({ includeEmpty: false }, (row) => {
         row.eachCell({ includeEmpty: false }, (cell) => {
