@@ -392,20 +392,21 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
     
     // 2. PREPARE THE QUERY
     let transQuery = supabase
-    .from('transactions')
-    .select(`
-      qty, 
-      prev_qty, 
-      type, 
-      created_at, 
-      item_id, 
-      items!inner(name, unit, division_id, divisions(name, restaurants(name))),
-      author:profiles!profile_id ( username ),
-      destination:restaurants!destination_id ( name ) 
-    `)
-    .gte('created_at', startDate)
-    .lt('created_at', endDate);
-    // 3. APPLY DIVISION FILTER (This fixes the "Mixed Divisions" issue)
+      .from('transactions')
+      .select(`
+        qty, 
+        prev_qty, 
+        type, 
+        created_at, 
+        item_id, 
+        items!inner(name, unit, division_id, divisions(name, restaurants(name))),
+        author:profiles!profile_id ( username ),
+        destination:restaurants!destination_id ( name ) 
+      `)
+      .gte('created_at', startDate)
+      .lt('created_at', endDate);
+
+    // 3. APPLY DIVISION FILTER
     if (selectedDivision !== 'all') {
       transQuery = transQuery.eq('items.division_id', selectedDivision);
     }
@@ -424,11 +425,12 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
     const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
     
     worksheet.addRow([`INVENTORY REPORT: ${currentDivName} (${month})`]);
-    worksheet.mergeCells(1, 1, 1, 6);
+    worksheet.mergeCells(1, 1, 1, 7); // Merged up to Column 7 to accommodate 'Total Out'
     worksheet.getRow(1).font = { bold: true, size: 14 };
 
-    const headerRow2 = ['No', 'Item Name', 'Restaurant', 'Division', 'Initial', 'Final'];
-    const headerRow3 = ['', '', '', '', '', ''];
+    // Added 'Total Out' to the headers
+    const headerRow2 = ['No', 'Item Name', 'Restaurant', 'Division', 'Initial', 'Final', 'Total Out'];
+    const headerRow3 = ['', '', '', '', '', '', ''];
 
     for (let d = 1; d <= daysInMonth; d++) {
       const dateLabel = `${String(d).padStart(2, '0')}-${new Date(year, monthIdx).toLocaleString('en-us', { month: 'short' })}`;
@@ -440,14 +442,21 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
     worksheet.addRow(headerRow3);
 
     items.forEach((item, index) => {
+      // Calculate total OUT quantity for this item for the entire month
+      const totalOut = transData
+        ?.filter(t => t.item_id === item.id && t.type === 'out')
+        .reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
+
       const rowData = [
         index + 1, 
         item.name, 
         item.divisions?.restaurants?.name || '-', 
         item.divisions?.name, 
         item.stock, 
-        item.stock
+        item.stock,
+        totalOut // <--- Total Out quantity column
       ];
+
       for (let d = 1; d <= daysInMonth; d++) {
         const dayIn = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'in')).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
         const dayOut = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'out')).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
@@ -456,7 +465,7 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
       worksheet.addRow(rowData);
     });
 
-    // --- TAB 2: ADJUSTMENT LOGS (Now Filtered) ---
+    // --- TAB 2: ADJUSTMENT LOGS ---
     const adjSheet = workbook.addWorksheet('Adjustment History');
     adjSheet.addRow([`ADJUSTMENT LOG: ${currentDivName} (${month})`]);
     adjSheet.mergeCells(1, 1, 1, 5); 
@@ -481,25 +490,23 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
         finalResult
       ]);
     });
+
     // --- TAB 3: DAILY MOVEMENT LOG ---
     const moveSheet = workbook.addWorksheet('Daily Movement');
 
-    // 1. Add Header Info
     moveSheet.addRow([`DETAILED MOVEMENT LOG: ${currentDivName} (${month})`]);
     moveSheet.mergeCells(1, 1, 1, 6); 
     moveSheet.getRow(1).font = { bold: true, size: 14 };
 
-    // 2. Add Table Headers (matching your screenshot)
     const moveHeader = ['Date and time', 'Item Name', 'Movement', 'Qty', 'Unit', 'Destination'];
     moveSheet.addRow(moveHeader);
     moveSheet.getRow(2).font = { bold: true };
     moveSheet.getRow(2).fill = {
       type: 'pattern',
       pattern: 'solid',
-      fgColor: { argb: 'FFE0E0E0' } // Light grey background
+      fgColor: { argb: 'FFE0E0E0' }
     };
 
-    // 3. Filter and Sort Transactions (Excluding adjustments, or keep them if you like)
     const movements = transData?.filter(t => t.type === 'in' || t.type === 'out') || [];
 
     movements.forEach((m: any) => {
@@ -510,24 +517,24 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
           day: '2-digit', month: '2-digit', year: 'numeric', 
           hour: '2-digit', minute: '2-digit', second: '2-digit', 
           hour12: true 
-        }).toUpperCase(), // Formats as 01-05-2026 (01:30:45 PM)
+        }).toUpperCase(),
         itemRef?.name || 'Unknown',
         m.type === 'in' ? 'In' : 'Out',
         Math.abs(m.qty),
         itemRef?.unit || '-',
-        m.destination?.name || '-' // This is your "📍 TO:" restaurant
+        m.destination?.name || '-'
       ]);
     });
 
-    // 4. Set Column Widths for readability
     moveSheet.columns = [
-      { width: 25 }, // Date
-      { width: 20 }, // Item
-      { width: 12 }, // Movement
-      { width: 8 },  // Qty
-      { width: 10 }, // Unit
-      { width: 25 }  // Destination
+      { width: 25 },
+      { width: 20 },
+      { width: 12 },
+      { width: 8 },
+      { width: 10 },
+      { width: 25 }
     ];
+
     // Final formatting and save
     workbook.worksheets.forEach(sheet => {
       sheet.eachRow({ includeEmpty: false }, (row) => {
