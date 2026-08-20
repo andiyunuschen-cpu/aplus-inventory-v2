@@ -373,7 +373,7 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
     }
   }
 
- async function exportReport() {
+async function exportReport() {
   if (!month) return alert('Select month first');
   setLoading(true);
 
@@ -382,7 +382,7 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
     const year = parseInt(yearStr);
     const monthIdx = parseInt(monthStr) - 1;
     
-    // 1. Calculate the start and end of the month correctly
+    // 1. Calculate month date bounds
     const startDate = `${month}-01`;
     const endDate = monthIdx === 11 
       ? `${year + 1}-01-01` 
@@ -390,7 +390,7 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
 
     const workbook = new ExcelJS.Workbook();
     
-    // 2. PREPARE THE QUERY
+    // 2. Fetch all transactions from startDate onwards
     let transQuery = supabase
       .from('transactions')
       .select(`
@@ -404,15 +404,17 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
         destination:restaurants!destination_id ( name ) 
       `)
       .gte('created_at', startDate)
-      .lt('created_at', endDate);
+      .order('created_at', { ascending: true });
 
-    // 3. APPLY DIVISION FILTER
     if (selectedDivision !== 'all') {
       transQuery = transQuery.eq('items.division_id', selectedDivision);
     }
 
-    const { data: transData, error: transError } = await transQuery;
+    const { data: allTransData, error: transError } = await transQuery;
     if (transError) throw transError;
+
+    // Filter transactions belonging specifically to the selected month
+    const monthTransData = allTransData?.filter(t => t.created_at < endDate) || [];
 
     // Identify current division name for headers
     const currentDiv = allDivisions.find(d => d.id === selectedDivision);
@@ -425,12 +427,12 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
     const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
     
     worksheet.addRow([`INVENTORY REPORT: ${currentDivName} (${month})`]);
-    worksheet.mergeCells(1, 1, 1, 7); // Merged up to Column 7 to accommodate 'Total Out'
+    worksheet.mergeCells(1, 1, 1, 9); // Updated merge width for 9 summary columns
     worksheet.getRow(1).font = { bold: true, size: 14 };
 
-    // Added 'Total Out' to the headers
-    const headerRow2 = ['No', 'Item Name', 'Restaurant', 'Division', 'Initial', 'Final', 'Total Out'];
-    const headerRow3 = ['', '', '', '', '', '', ''];
+    // Summary headers including Adjustment Qty
+    const headerRow2 = ['No', 'Item Name', 'Restaurant', 'Division', 'Initial', 'Total In', 'Total Out', 'Adjustment Qty', 'Final'];
+    const headerRow3 = ['', '', '', '', '', '', '', '', ''];
 
     for (let d = 1; d <= daysInMonth; d++) {
       const dateLabel = `${String(d).padStart(2, '0')}-${new Date(year, monthIdx).toLocaleString('en-us', { month: 'short' })}`;
@@ -442,26 +444,73 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
     worksheet.addRow(headerRow3);
 
     items.forEach((item, index) => {
-      // Calculate total OUT quantity for this item for the entire month
-      const totalOut = transData
-        ?.filter(t => t.item_id === item.id && t.type === 'out')
-        .reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
+      // Get all transactions for this item from startDate until TODAY
+      const itemAllTrans = (allTransData || [])
+        .filter(t => t.item_id === item.id)
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()); // Newest first
+
+      // Step 1: Rewind current live stock back to the 1st of the selected month
+      let initialStock = item.stock;
+      itemAllTrans.forEach(t => {
+        if (t.type === 'in') {
+          initialStock -= Math.abs(t.qty);
+        } else if (t.type === 'out') {
+          initialStock += Math.abs(t.qty);
+        } else if (t.type === 'adjustment') {
+          initialStock = t.prev_qty || 0;
+        }
+      });
+
+      // Step 2: Get transactions within the selected month (oldest first)
+      const itemMonthTrans = itemAllTrans
+        .filter(t => t.created_at < endDate)
+        .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+      // Step 3: Calculate Total In, Total Out, Total Adjustments, and Final Stock
+      let finalStock = initialStock;
+      let totalIn = 0;
+      let totalOut = 0;
+      let totalAdj = 0;
+
+      itemMonthTrans.forEach(t => {
+        if (t.type === 'in') {
+          finalStock += Math.abs(t.qty);
+          totalIn += Math.abs(t.qty);
+        } else if (t.type === 'out') {
+          finalStock -= Math.abs(t.qty);
+          totalOut += Math.abs(t.qty);
+        } else if (t.type === 'adjustment') {
+          const adjDiff = t.qty - (t.prev_qty || 0); // Calculate net adjustment impact
+          totalAdj += adjDiff;
+          finalStock = t.qty;
+        }
+      });
 
       const rowData = [
         index + 1, 
         item.name, 
         item.divisions?.restaurants?.name || '-', 
         item.divisions?.name, 
-        item.stock, 
-        item.stock,
-        totalOut // <--- Total Out quantity column
+        initialStock, 
+        totalIn,   
+        totalOut,  
+        totalAdj, // <--- Net Adjustment Column
+        finalStock
       ];
 
+      // Step 4: Populate Daily In / Out Matrix
       for (let d = 1; d <= daysInMonth; d++) {
-        const dayIn = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'in')).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
-        const dayOut = transData?.filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && (t.type === 'out')).reduce((sum, t) => sum + Math.abs(t.qty), 0) || 0;
+        const dayIn = monthTransData
+          .filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && t.type === 'in')
+          .reduce((sum, t) => sum + Math.abs(t.qty), 0);
+          
+        const dayOut = monthTransData
+          .filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && t.type === 'out')
+          .reduce((sum, t) => sum + Math.abs(t.qty), 0);
+
         rowData.push(dayIn, dayOut);
       }
+
       worksheet.addRow(rowData);
     });
 
@@ -474,7 +523,7 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
     adjSheet.addRow(['Date & Time', 'Item Name', 'Stock Before', 'Adjustment', 'Final Result']);
     adjSheet.getRow(2).font = { bold: true };
 
-    const adjustments = transData?.filter(t => t.type === 'adjustment') || [];
+    const adjustments = monthTransData.filter(t => t.type === 'adjustment');
 
     adjustments.forEach((adj: any) => {
       const itemRef = Array.isArray(adj.items) ? adj.items[0] : adj.items;
@@ -507,7 +556,7 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
       fgColor: { argb: 'FFE0E0E0' }
     };
 
-    const movements = transData?.filter(t => t.type === 'in' || t.type === 'out') || [];
+    const movements = monthTransData.filter(t => t.type === 'in' || t.type === 'out');
 
     movements.forEach((m: any) => {
       const itemRef = Array.isArray(m.items) ? m.items[0] : m.items;
