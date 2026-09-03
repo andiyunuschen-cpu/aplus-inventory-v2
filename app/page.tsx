@@ -1,23 +1,24 @@
 'use client'
 
-import { useEffect, useState, useRef } from 'react' // 1. Make sure useRef is imported
+import { useEffect, useState, useRef } from 'react'
 import { supabase } from '../lib/supabaseClient'
 import ExcelJS from 'exceljs'
 import { saveAs } from 'file-saver'
 
 export default function Home() {
-  
   const [targetUserId, setTargetUserId] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [adminMsg, setAdminMsg] = useState('')
-  const [allRestaurants, setAllRestaurants] = useState<any[]>([]);
+  const [allRestaurants, setAllRestaurants] = useState<any[]>([])
+
   // --- AUTH & USER STATE ---
   const [user, setUser] = useState<any>(null)
   const [profile, setProfile] = useState<any>(null)
-  const hasInitialized = useRef(false);
+  const hasInitialized = useRef(false)
   const [loading, setLoading] = useState(true)
   const [username, setUsername] = useState('') 
   const [password, setPassword] = useState('')
+
   // --- INVENTORY STATE ---
   const [items, setItems] = useState<any[]>([])
   const [qtyMap, setQtyMap] = useState<{ [key: string]: any }>({})
@@ -25,32 +26,36 @@ export default function Home() {
   const [unit, setUnit] = useState('')
   const [transactions, setTransactions] = useState<any[]>([])
   
-  // --- FILTER STATE ---
+  // --- FILTER & SORT STATE ---
   const [search, setSearch] = useState('')
   const [month, setMonth] = useState('')
   const [selectedDivision, setSelectedDivision] = useState<string>('all')
   const [allDivisions, setAllDivisions] = useState<any[]>([])
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editingDestId, setEditingDestId] = useState<string | null>(null);
-  const [editName, setEditName] = useState('');
-  const [editUnit, setEditUnit] = useState('');
-  const [showEmptyOnly, setShowEmptyOnly] = useState(false);
-  const [destMap, setDestMap] = useState<{ [key: string]: string }>({});
-  const [page, setPage] = useState(0);
-  const [hasMore, setHasMore] = useState(true);
-  const [editingDateId, setEditingDateId] = useState<string | null>(null);
-  const [editDateValue, setEditDateValue] = useState<string>('');
-  const [editingQtyId, setEditingQtyId] = useState<string | null>(null);
-  const [editQtyValue, setEditQtyValue] = useState<string>('');
-  // 1. Initial Load
- // 1. IMPROVED BOOT SEQUENCE
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingDestId, setEditingDestId] = useState<string | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editUnit, setEditUnit] = useState('')
+  const [showEmptyOnly, setShowEmptyOnly] = useState(false)
+  const [destMap, setDestMap] = useState<{ [key: string]: string }>({})
+  const [page, setPage] = useState(0)
+  const [hasMore, setHasMore] = useState(true)
+  const [editingDateId, setEditingDateId] = useState<string | null>(null)
+  const [editDateValue, setEditDateValue] = useState<string>('')
+  const [editingQtyId, setEditingQtyId] = useState<string | null>(null)
+  const [editQtyValue, setEditQtyValue] = useState<string>('')
+
+  // --- INDEPENDENT ACTIVITY FEED CONTROLS ---
+  const [activityTimeSort, setActivityTimeSort] = useState<'newest' | 'oldest'>('newest')
+  const [activityDestFilter, setActivityDestFilter] = useState<string>('all')
+  const [activityMonth, setActivityMonth] = useState<string>('')
+
+  // 1. Initial Load / Boot Sequence
   useEffect(() => {
     if (hasInitialized.current) return;
     
     const initApp = async () => {
       hasInitialized.current = true;
       
-      // SAFETY CATCH: If Supabase hangs for more than 5 seconds, stop loading
       const timeout = setTimeout(() => {
         if (loading) {
           console.warn("Supabase took too long. Forcing load-stop.");
@@ -61,7 +66,6 @@ export default function Home() {
       try {
         const userProfile = await checkUser();
         if (userProfile) {
-          // Use Promise.all so they run in parallel (faster)
           await Promise.all([fetchItems(), fetchTransactions()]);
         }
       } catch (err) {
@@ -74,7 +78,8 @@ export default function Home() {
 
     initApp();
   }, []);
-async function handleLogin() {
+
+  async function handleLogin() {
     setLoading(true);
     let loginEmail = username.toLowerCase().trim();
 
@@ -95,160 +100,161 @@ async function handleLogin() {
     }
   }
 
- async function checkUser() {
-  try {
-    const { data: { session } } = await supabase.auth.getSession();
-    const currentUser = session?.user;
+  async function checkUser() {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const currentUser = session?.user;
 
-    if (!currentUser) {
+      if (!currentUser) {
+        setUser(null);
+        return null;
+      }
+
+      setUser(currentUser);
+
+      const { data: prof, error: profError } = await supabase
+        .from('profiles')
+        .select('*, restaurants(name)')
+        .eq('id', currentUser.id)
+        .single();
+      
+      if (profError) throw profError;
+      
+      setProfile(prof);
+
+      const { data: globalRestaurants } = await supabase
+        .from('restaurants')
+        .select('id, name')
+        .order('name');
+
+      if (globalRestaurants) {
+        setAllRestaurants(globalRestaurants);
+      }
+
+      let divQuery = supabase
+        .from('divisions')
+        .select(`
+          id, 
+          name, 
+          restaurant_id, 
+          restaurants (
+            id,
+            name
+          )
+        `);      
+      
+      if (prof?.division_id) {
+        divQuery = divQuery.eq('id', prof.division_id);
+      } else if (prof?.role !== 'super-admin' && prof?.restaurant_id) {
+        divQuery = divQuery.eq('restaurant_id', prof.restaurant_id);
+      }
+
+      const { data: divs } = await divQuery;
+      const availableDivs = divs || [];
+      setAllDivisions(availableDivs);
+      
+      if (availableDivs.length === 1) {
+        setSelectedDivision(availableDivs[0].id);
+      } else if (prof?.role !== 'super-admin' && availableDivs.length > 0) {
+        setSelectedDivision(availableDivs[0].id);
+      } else {
+        setSelectedDivision('all');
+      }
+      
+      return prof; 
+
+    } catch (err) {
+      console.error("Auth System Error:", err);
       setUser(null);
       return null;
     }
-
-    setUser(currentUser);
-
-    const { data: prof, error: profError } = await supabase
-      .from('profiles')
-      .select('*, restaurants(name)')
-      .eq('id', currentUser.id)
-      .single();
-    
-    if (profError) throw profError;
-    
-    setProfile(prof);
-
-    // --- 1. FETCH ALL RESTAURANTS (Moved here so it actually runs) ---
-    const { data: globalRestaurants } = await supabase
-      .from('restaurants')
-      .select('id, name')
-      .order('name');
-
-    if (globalRestaurants) {
-      setAllRestaurants(globalRestaurants);
-    }
-
-    // --- 2. FETCH DIVISIONS ---
-    let divQuery = supabase
-      .from('divisions')
-      .select(`
-        id, 
-        name, 
-        restaurant_id, 
-        restaurants (
-          id,
-          name
-        )
-      `);      
-    
-    if (prof?.division_id) {
-      divQuery = divQuery.eq('id', prof.division_id);
-    } else if (prof?.role !== 'super-admin' && prof?.restaurant_id) {
-      divQuery = divQuery.eq('restaurant_id', prof.restaurant_id);
-    }
-
-    const { data: divs } = await divQuery;
-    const availableDivs = divs || [];
-    setAllDivisions(availableDivs);
-    
-    if (availableDivs.length === 1) {
-      setSelectedDivision(availableDivs[0].id);
-    } else if (prof?.role !== 'super-admin' && availableDivs.length > 0) {
-      setSelectedDivision(availableDivs[0].id);
-    } else {
-      setSelectedDivision('all');
-    }
-    
-    // THE FUNCTION ENDS HERE
-    return prof; 
-
-  } catch (err) {
-    console.error("Auth System Error:", err);
-    setUser(null);
-    return null;
   }
-}
-    async function fetchItems() {
-    // 1. Safety Gate: Don't run if profile or divisions aren't loaded yet
+
+  async function fetchItems() {
     if (!profile || (profile.role !== 'super-admin' && allDivisions.length === 0)) {
       return;
     }
     
     let query = supabase
-        .from('items')
-        .select('*, divisions!inner(name, restaurant_id, restaurants(name))')
-        .order('name')
+      .from('items')
+      .select('*, divisions!inner(name, restaurant_id, restaurants(name))')
+      .order('name');
     
     if (selectedDivision !== 'all') {
-      query = query.eq('division_id', selectedDivision)
+      query = query.eq('division_id', selectedDivision);
     } else if (profile.role !== 'super-admin') {
-      // 2. Lock to the divisions we just loaded in checkUser
-      const authorizedIds = allDivisions.map(d => d.id)
-      query = query.in('division_id', authorizedIds)
+      const authorizedIds = allDivisions.map(d => d.id);
+      query = query.in('division_id', authorizedIds);
     }
 
-    const { data, error } = await query
+    const { data, error } = await query;
     if (error) {
-      console.error("Fetch Error:", error.message)
+      console.error("Fetch Error:", error.message);
     } else {
-      setItems(data || [])
+      setItems(data || []);
     }
   }
 
-  // Add 'search' as a parameter so it can be passed from the UI
-async function fetchTransactions(search = '', isLoadMore = false) {
-  if (!user || !profile) return;
+  async function fetchTransactions(searchQuery = search, isLoadMore = false, monthFilter = activityMonth) {
+    if (!user || !profile) return;
 
-  const pageSize = 30;
-  const start = isLoadMore ? (page + 1) * pageSize : 0;
-  const end = start + pageSize - 1;
+    const pageSize = 30;
+    const start = isLoadMore ? (page + 1) * pageSize : 0;
+    const end = start + pageSize - 1;
 
-  // 1. Start the query
-  let query = supabase
-    .from('transactions')
-    .select(`
-      id, qty, prev_qty, type, created_at, item_id, destination_id,
-      items!inner ( name, unit, division_id ), 
-      author:profiles!profile_id ( username ),
-      destination:restaurants!destination_id ( name )
-    `)
-    .order('created_at', { ascending: false })
-    .range(start, end);
+    let query = supabase
+      .from('transactions')
+      .select(`
+        id, qty, prev_qty, type, created_at, item_id, destination_id,
+        items!inner ( name, unit, division_id ), 
+        author:profiles!profile_id ( username ),
+        destination:restaurants!destination_id ( name )
+      `)
+      .order('created_at', { ascending: false });
 
-  // 2. THE FIX: Filter by Division
-  // If "all" is selected (Super Admin), we don't filter by division.
-  // Otherwise, we force the query to only show items from that division.
-  if (selectedDivision !== 'all') {
-    query = query.eq('items.division_id', selectedDivision);
-  }
-
-  // 3. Apply Search if any
-  if (search) {
-    query = query.ilike('items.name', `%${search}%`);
-  }
-
-  const { data, error } = await query;
-
-  if (!error && data) {
-    if (isLoadMore) {
-      setTransactions(prev => [...prev, ...data]);
-      setPage(prev => prev + 1);
-    } else {
-      setTransactions(data);
-      setPage(0);
+    if (selectedDivision !== 'all') {
+      query = query.eq('items.division_id', selectedDivision);
     }
-    setHasMore(data.length === pageSize);
-  }
-}
 
-  // 3. REFRESH DATA ON DROPDOWN CHANGE
-  // This ensures that when you switch from "Global" to a specific branch, it re-fetches
+    if (searchQuery) {
+      query = query.ilike('items.name', `%${searchQuery}%`);
+    }
+
+    if (monthFilter) {
+      const [yearStr, monthStr] = monthFilter.split('-');
+      const year = parseInt(yearStr);
+      const monthIdx = parseInt(monthStr) - 1;
+      const startDate = `${monthFilter}-01`;
+      const endDate = monthIdx === 11 
+        ? `${year + 1}-01-01` 
+        : `${year}-${String(monthIdx + 2).padStart(2, '0')}-01`;
+
+      query = query.gte('created_at', startDate).lt('created_at', endDate);
+    }
+
+    query = query.range(start, end);
+
+    const { data, error } = await query;
+
+    if (!error && data) {
+      if (isLoadMore) {
+        setTransactions(prev => [...prev, ...data]);
+        setPage(prev => prev + 1);
+      } else {
+        setTransactions(data);
+        setPage(0);
+      }
+      setHasMore(data.length === pageSize);
+    }
+  }
+
   useEffect(() => {
     if (hasInitialized.current && user && profile) {
       fetchItems();
       fetchTransactions();
     }
   }, [selectedDivision]);
-// This looks at the selected division and sets the dropdowns automatically
+
   useEffect(() => {
     if (selectedDivision !== 'all') {
       const currentDiv = allDivisions.find(d => d.id === selectedDivision);
@@ -263,13 +269,12 @@ async function fetchTransactions(search = '', isLoadMore = false) {
     }
   }, [selectedDivision, items]);
 
-// ... start of addNewItem ...
   async function addNewItem() {
-    if (!newItem) return
-    const targetDivision = selectedDivision !== 'all' ? selectedDivision : (profile.role === 'staff' ? allDivisions[0]?.id : null)
+    if (!newItem) return;
+    const targetDivision = selectedDivision !== 'all' ? selectedDivision : (profile.role === 'staff' ? allDivisions[0]?.id : null);
     
     if (!targetDivision) {
-      return alert("Please select a specific Division (Dry/Wet/Frozen) first.")
+      return alert("Please select a specific Division (Dry/Wet/Frozen) first.");
     }
 
     const { error } = await supabase.from('items').insert({
@@ -277,46 +282,45 @@ async function fetchTransactions(search = '', isLoadMore = false) {
       stock: 0,
       unit: unit,
       division_id: targetDivision
-    })
-
-    if (!error) {
-      setNewItem(''); setUnit(''); fetchItems()
-    } else {
-      alert(error.message)
-    }
-  }
-
-async function updateStock(itemId: string, numQty: number, destId?: string) {
-    if (!numQty || numQty === 0) return;
-
-    // Check for negative input bypass
-    const rawInput = Number(qtyMap[itemId]); 
-    if (rawInput < 0) {
-        alert("Please enter a positive number. Use 'OUT' to subtract.");
-        return; 
-    }
-
-    const { error } = await supabase.rpc('update_stock', { 
-        item_id: itemId, 
-        qty: numQty,
-        dest_id: destId || null 
     });
 
     if (!error) {
-        setQtyMap(prev => ({ ...prev, [itemId]: '' }));
-        fetchItems();
-        fetchTransactions();
+      setNewItem(''); setUnit(''); fetchItems();
     } else {
-        alert("Action failed: " + error.message);
+      alert(error.message);
     }
-}
+  }
 
- async function adjustStock(itemId: string, qty: any) {
-    const numQty = parseInt(qty); // Use parseInt to ensure it's a clean integer
+  async function updateStock(itemId: string, numQty: number, destId?: string) {
+    if (!numQty || numQty === 0) return;
+
+    const rawInput = Number(qtyMap[itemId]); 
+    if (rawInput < 0) {
+      alert("Please enter a positive number. Use 'OUT' to subtract.");
+      return; 
+    }
+
+    const { error } = await supabase.rpc('update_stock', { 
+      item_id: itemId, 
+      qty: numQty,
+      dest_id: destId || null 
+    });
+
+    if (!error) {
+      setQtyMap(prev => ({ ...prev, [itemId]: '' }));
+      fetchItems();
+      fetchTransactions();
+    } else {
+      alert("Action failed: " + error.message);
+    }
+  }
+
+  async function adjustStock(itemId: string, qty: any) {
+    const numQty = parseInt(qty);
     
     if (isNaN(numQty)) {
-        alert("Please enter a valid number first.");
-        return;
+      alert("Please enter a valid number first.");
+      return;
     }
 
     const item = items.find(i => i.id === itemId);
@@ -324,39 +328,37 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
 
     if (!confirm(`Set stock for ${item.name} from ${oldQty} to ${numQty}?`)) return;
 
-    // 1. Log the attempt to your console so you can see what is being sent
-    console.log("Adjusting Item:", itemId, "to Qty:", numQty);
-
     const { error } = await supabase.rpc('adjust_stock', { 
-        item_id: itemId, 
-        new_qty: numQty 
+      item_id: itemId, 
+      new_qty: numQty 
     });
     
     if (error) {
-        // 2. This will tell you EXACTLY why Postgres rejected it
-        console.error("RPC Error Details:", error);
-        alert(`Failed: ${error.message}`); 
+      console.error("RPC Error Details:", error);
+      alert(`Failed: ${error.message}`); 
     } else { 
-        setQtyMap(prev => ({ ...prev, [itemId]: '' })); 
-        fetchItems(); 
-        fetchTransactions(); 
-        alert("Stock adjusted successfully!"); // Optional: confirms it worked
+      setQtyMap(prev => ({ ...prev, [itemId]: '' })); 
+      fetchItems(); 
+      fetchTransactions(); 
+      alert("Stock adjusted successfully!");
     }
-}
+  }
+
   async function deleteItem(itemId: string, itemName: string) {
-  if (!confirm(`WARNING: This will permanently delete "${itemName}" and ALL its transaction history. Proceed?`)) return;
-  
-  setLoading(true);
-  const { error } = await supabase.rpc('force_delete_item', { target_item_id: itemId });
-  
-  if (!error) {
-    fetchItems();
-    fetchTransactions();
-  } else {
-    alert("Delete failed: " + error.message);
+    if (!confirm(`WARNING: This will permanently delete "${itemName}" and ALL its transaction history. Proceed?`)) return;
+    
+    setLoading(true);
+    const { error } = await supabase.rpc('force_delete_item', { target_item_id: itemId });
+    
+    if (!error) {
+      fetchItems();
+      fetchTransactions();
+    } else {
+      alert("Delete failed: " + error.message);
+    }
+    setLoading(false);
   }
-  setLoading(false);
-  }
+
   async function updateItem(itemId: string) {
     if (!editName.trim() || !editUnit.trim()) return alert("Fields cannot be empty");
 
@@ -367,427 +369,396 @@ async function updateStock(itemId: string, numQty: number, destId?: string) {
 
     if (!error) {
       setEditingId(null);
-      fetchItems(); // Refresh the list to show new name/unit
+      fetchItems();
     } else {
       alert("Update failed: " + error.message);
     }
   }
 
-async function exportReport() {
-  if (!month) return alert('Select month first');
-  setLoading(true);
+  async function exportReport() {
+    if (!month) return alert('Select month first');
+    setLoading(true);
 
-  try {
-    const [yearStr, monthStr] = month.split('-');
-    const year = parseInt(yearStr);
-    const monthIdx = parseInt(monthStr) - 1;
-    
-    // 1. Calculate month date bounds
-    const startDate = `${month}-01`;
-    const endDate = monthIdx === 11 
-      ? `${year + 1}-01-01` 
-      : `${year}-${String(monthIdx + 2).padStart(2, '0')}-01`;
+    try {
+      const [yearStr, monthStr] = month.split('-');
+      const year = parseInt(yearStr);
+      const monthIdx = parseInt(monthStr) - 1;
+      
+      const startDate = `${month}-01`;
+      const endDate = monthIdx === 11 
+        ? `${year + 1}-01-01` 
+        : `${year}-${String(monthIdx + 2).padStart(2, '0')}-01`;
 
-    const workbook = new ExcelJS.Workbook();
-    
-    // 2. Fetch all transactions from startDate onwards
-    let transQuery = supabase
-      .from('transactions')
-      .select(`
-        qty, 
-        prev_qty, 
-        type, 
-        created_at, 
-        item_id, 
-        destination_id,
-        items!inner(name, unit, division_id, divisions(name, restaurants(name))),
-        author:profiles!profile_id ( username ),
-        destination:restaurants!destination_id ( name ) 
-      `)
-      .gte('created_at', startDate)
-      .order('created_at', { ascending: true });
+      const workbook = new ExcelJS.Workbook();
+      
+      let transQuery = supabase
+        .from('transactions')
+        .select(`
+          qty, 
+          prev_qty, 
+          type, 
+          created_at, 
+          item_id, 
+          destination_id,
+          items!inner(name, unit, division_id, divisions(name, restaurants(name))),
+          author:profiles!profile_id ( username ),
+          destination:restaurants!destination_id ( name ) 
+        `)
+        .gte('created_at', startDate)
+        .order('created_at', { ascending: true });
 
-    if (selectedDivision !== 'all') {
-      transQuery = transQuery.eq('items.division_id', selectedDivision);
-    }
-
-    const { data: allTransData, error: transError } = await transQuery;
-    if (transError) throw transError;
-
-    // Filter transactions belonging specifically to the selected month
-    const monthTransData = allTransData?.filter(t => t.created_at < endDate) || [];
-
-    // Identify current division name for headers
-    const currentDiv = allDivisions.find(d => d.id === selectedDivision);
-    const currentDivName = currentDiv 
-      ? `${currentDiv.restaurants?.name || 'Branch'} - ${currentDiv.name}` 
-      : 'All Authorized Branches';
-
-    // --- TAB 1: MONTHLY INVENTORY ---
-    const worksheet = workbook.addWorksheet('Monthly Inventory');
-    const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
-    
-    worksheet.addRow([`INVENTORY REPORT: ${currentDivName} (${month})`]);
-    worksheet.mergeCells(1, 1, 1, 9);
-    worksheet.getRow(1).font = { bold: true, size: 14 };
-
-    const headerRow2 = ['No', 'Item Name', 'Restaurant', 'Division', 'Initial', 'Total In', 'Total Out', 'Adjustment Qty', 'Final'];
-    const headerRow3 = ['', '', '', '', '', '', '', '', ''];
-
-    for (let d = 1; d <= daysInMonth; d++) {
-      const dateLabel = `${String(d).padStart(2, '0')}-${new Date(year, monthIdx).toLocaleString('en-us', { month: 'short' })}`;
-      headerRow2.push(dateLabel, ''); 
-      headerRow3.push('In', 'Out');
-    }
-
-    worksheet.addRow(headerRow2);
-    worksheet.addRow(headerRow3);
-
-    items.forEach((item, index) => {
-      const itemAllTrans = (allTransData || [])
-        .filter(t => t.item_id === item.id)
-        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-
-      let initialStock = item.stock;
-      itemAllTrans.forEach(t => {
-        if (t.type === 'in') {
-          initialStock -= Math.abs(t.qty);
-        } else if (t.type === 'out') {
-          initialStock += Math.abs(t.qty);
-        } else if (t.type === 'adjustment') {
-          initialStock = t.prev_qty || 0;
-        }
-      });
-
-      const itemMonthTrans = itemAllTrans
-        .filter(t => t.created_at < endDate)
-        .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-
-      let finalStock = initialStock;
-      let totalIn = 0;
-      let totalOut = 0;
-      let totalAdj = 0;
-
-      itemMonthTrans.forEach(t => {
-        if (t.type === 'in') {
-          finalStock += Math.abs(t.qty);
-          totalIn += Math.abs(t.qty);
-        } else if (t.type === 'out') {
-          finalStock -= Math.abs(t.qty);
-          totalOut += Math.abs(t.qty);
-        } else if (t.type === 'adjustment') {
-          const adjDiff = t.qty - (t.prev_qty || 0);
-          totalAdj += adjDiff;
-          finalStock = t.qty;
-        }
-      });
-
-      const rowData = [
-        index + 1, 
-        item.name, 
-        item.divisions?.restaurants?.name || '-', 
-        item.divisions?.name, 
-        initialStock, 
-        totalIn,   
-        totalOut,  
-        totalAdj,
-        finalStock
-      ];
-
-      for (let d = 1; d <= daysInMonth; d++) {
-        const dayIn = monthTransData
-          .filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && t.type === 'in')
-          .reduce((sum, t) => sum + Math.abs(t.qty), 0);
-          
-        const dayOut = monthTransData
-          .filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && t.type === 'out')
-          .reduce((sum, t) => sum + Math.abs(t.qty), 0);
-
-        rowData.push(dayIn, dayOut);
+      if (selectedDivision !== 'all') {
+        transQuery = transQuery.eq('items.division_id', selectedDivision);
       }
 
-      worksheet.addRow(rowData);
-    });
+      const { data: allTransData, error: transError } = await transQuery;
+      if (transError) throw transError;
 
-    // --- TAB 2: ADJUSTMENT LOGS ---
-    const adjSheet = workbook.addWorksheet('Adjustment History');
-    adjSheet.addRow([`ADJUSTMENT LOG: ${currentDivName} (${month})`]);
-    adjSheet.mergeCells(1, 1, 1, 5); 
-    adjSheet.getRow(1).font = { bold: true, size: 14 };
+      const monthTransData = allTransData?.filter(t => t.created_at < endDate) || [];
 
-    adjSheet.addRow(['Date & Time', 'Item Name', 'Stock Before', 'Adjustment', 'Final Result']);
-    adjSheet.getRow(2).font = { bold: true };
+      const currentDiv = allDivisions.find(d => d.id === selectedDivision);
+      const currentDivName = currentDiv 
+        ? `${currentDiv.restaurants?.name || 'Branch'} - ${currentDiv.name}` 
+        : 'All Authorized Branches';
 
-    const adjustments = monthTransData.filter(t => t.type === 'adjustment');
-
-    adjustments.forEach((adj: any) => {
-      const itemRef = Array.isArray(adj.items) ? adj.items[0] : adj.items;
-      const finalResult = adj.qty;
-      const stockBefore = adj.prev_qty || 0;
-      const difference = finalResult - stockBefore;
-
-      adjSheet.addRow([
-        new Date(adj.created_at).toLocaleString(),
-        itemRef?.name || 'Unknown',
-        stockBefore,
-        difference > 0 ? `+${difference}` : difference,
-        finalResult
-      ]);
-    });
-
-    // --- TAB 3: DAILY MOVEMENT LOG ---
-    const moveSheet = workbook.addWorksheet('Daily Movement');
-
-    moveSheet.addRow([`DETAILED MOVEMENT LOG: ${currentDivName} (${month})`]);
-    moveSheet.mergeCells(1, 1, 1, 6); 
-    moveSheet.getRow(1).font = { bold: true, size: 14 };
-
-    const moveHeader = ['Date and time', 'Item Name', 'Movement', 'Qty', 'Unit', 'Destination'];
-    moveSheet.addRow(moveHeader);
-    moveSheet.getRow(2).font = { bold: true };
-    moveSheet.getRow(2).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FFE0E0E0' }
-    };
-
-    const movements = monthTransData.filter(t => t.type === 'in' || t.type === 'out');
-
-    movements.forEach((m: any) => {
-      const itemRef = Array.isArray(m.items) ? m.items[0] : m.items;
+      // --- TAB 1: MONTHLY INVENTORY ---
+      const worksheet = workbook.addWorksheet('Monthly Inventory');
+      const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
       
-      moveSheet.addRow([
-        new Date(m.created_at).toLocaleString('en-GB', { 
-          day: '2-digit', month: '2-digit', year: 'numeric', 
-          hour: '2-digit', minute: '2-digit', second: '2-digit', 
-          hour12: true 
-        }).toUpperCase(),
-        itemRef?.name || 'Unknown',
-        m.type === 'in' ? 'In' : 'Out',
-        Math.abs(m.qty),
-        itemRef?.unit || '-',
-        m.destination?.name || '-'
-      ]);
-    });
+      worksheet.addRow([`INVENTORY REPORT: ${currentDivName} (${month})`]);
+      worksheet.mergeCells(1, 1, 1, 9);
+      worksheet.getRow(1).font = { bold: true, size: 14 };
 
-    moveSheet.columns = [
-      { width: 25 },
-      { width: 20 },
-      { width: 12 },
-      { width: 8 },
-      { width: 10 },
-      { width: 25 }
-    ];
+      const headerRow2 = ['No', 'Item Name', 'Restaurant', 'Division', 'Initial', 'Total In', 'Total Out', 'Adjustment Qty', 'Final'];
+      const headerRow3 = ['', '', '', '', '', '', '', '', ''];
 
-    // --- TAB 4: RESTAURANT OUT BREAKDOWN ---
-    const restSheet = workbook.addWorksheet('Restaurant Summary');
+      for (let d = 1; d <= daysInMonth; d++) {
+        const dateLabel = `${String(d).padStart(2, '0')}-${new Date(year, monthIdx).toLocaleString('en-us', { month: 'short' })}`;
+        headerRow2.push(dateLabel, ''); 
+        headerRow3.push('In', 'Out');
+      }
 
-    restSheet.addRow([`RESTAURANT OUT BREAKDOWN: ${currentDivName} (${month})`]);
-    restSheet.mergeCells(1, 1, 1, 5 + allRestaurants.length); 
-    restSheet.getRow(1).font = { bold: true, size: 14 };
+      worksheet.addRow(headerRow2);
+      worksheet.addRow(headerRow3);
 
-    // Build Table Headers dynamically based on registered restaurants
-    const restHeader = ['No', 'Item Name', 'Division', 'Unit'];
-    allRestaurants.forEach((res: any) => {
-      restHeader.push(`📍 ${res.name}`);
-    });
-    restHeader.push('Unspecified / None', 'Total Sent');
+      items.forEach((item, index) => {
+        const itemAllTrans = (allTransData || [])
+          .filter(t => t.item_id === item.id)
+          .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-    restSheet.addRow(restHeader);
-    restSheet.getRow(2).font = { bold: true };
-    restSheet.getRow(2).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FFE0E0E0' }
-    };
+        let initialStock = item.stock;
+        itemAllTrans.forEach(t => {
+          if (t.type === 'in') {
+            initialStock -= Math.abs(t.qty);
+          } else if (t.type === 'out') {
+            initialStock += Math.abs(t.qty);
+          } else if (t.type === 'adjustment') {
+            initialStock = t.prev_qty || 0;
+          }
+        });
 
-    items.forEach((item, index) => {
-      // Filter OUT movements for this specific item in the selected month
-      const itemOuts = monthTransData.filter(t => t.item_id === item.id && t.type === 'out');
+        const itemMonthTrans = itemAllTrans
+          .filter(t => t.created_at < endDate)
+          .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
-      const rowData: any[] = [
-        index + 1,
-        item.name,
-        item.divisions?.name || '-',
-        item.unit || '-'
+        let finalStock = initialStock;
+        let totalIn = 0;
+        let totalOut = 0;
+        let totalAdj = 0;
+
+        itemMonthTrans.forEach(t => {
+          if (t.type === 'in') {
+            finalStock += Math.abs(t.qty);
+            totalIn += Math.abs(t.qty);
+          } else if (t.type === 'out') {
+            finalStock -= Math.abs(t.qty);
+            totalOut += Math.abs(t.qty);
+          } else if (t.type === 'adjustment') {
+            const adjDiff = t.qty - (t.prev_qty || 0);
+            totalAdj += adjDiff;
+            finalStock = t.qty;
+          }
+        });
+
+        const rowData = [
+          index + 1, 
+          item.name, 
+          item.divisions?.restaurants?.name || '-', 
+          item.divisions?.name, 
+          initialStock, 
+          totalIn,   
+          totalOut,  
+          totalAdj,
+          finalStock
+        ];
+
+        for (let d = 1; d <= daysInMonth; d++) {
+          const dayIn = monthTransData
+            .filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && t.type === 'in')
+            .reduce((sum, t) => sum + Math.abs(t.qty), 0);
+            
+          const dayOut = monthTransData
+            .filter(t => t.item_id === item.id && new Date(t.created_at).getDate() === d && t.type === 'out')
+            .reduce((sum, t) => sum + Math.abs(t.qty), 0);
+
+          rowData.push(dayIn, dayOut);
+        }
+
+        worksheet.addRow(rowData);
+      });
+
+      // --- TAB 2: ADJUSTMENT LOGS ---
+      const adjSheet = workbook.addWorksheet('Adjustment History');
+      adjSheet.addRow([`ADJUSTMENT LOG: ${currentDivName} (${month})`]);
+      adjSheet.mergeCells(1, 1, 1, 5); 
+      adjSheet.getRow(1).font = { bold: true, size: 14 };
+
+      adjSheet.addRow(['Date & Time', 'Item Name', 'Stock Before', 'Adjustment', 'Final Result']);
+      adjSheet.getRow(2).font = { bold: true };
+
+      const adjustments = monthTransData.filter(t => t.type === 'adjustment');
+
+      adjustments.forEach((adj: any) => {
+        const itemRef = Array.isArray(adj.items) ? adj.items[0] : adj.items;
+        const finalResult = adj.qty;
+        const stockBefore = adj.prev_qty || 0;
+        const difference = finalResult - stockBefore;
+
+        adjSheet.addRow([
+          new Date(adj.created_at).toLocaleString(),
+          itemRef?.name || 'Unknown',
+          stockBefore,
+          difference > 0 ? `+${difference}` : difference,
+          finalResult
+        ]);
+      });
+
+      // --- TAB 3: DAILY MOVEMENT LOG ---
+      const moveSheet = workbook.addWorksheet('Daily Movement');
+
+      moveSheet.addRow([`DETAILED MOVEMENT LOG: ${currentDivName} (${month})`]);
+      moveSheet.mergeCells(1, 1, 1, 6); 
+      moveSheet.getRow(1).font = { bold: true, size: 14 };
+
+      const moveHeader = ['Date and time', 'Item Name', 'Movement', 'Qty', 'Unit', 'Destination'];
+      moveSheet.addRow(moveHeader);
+      moveSheet.getRow(2).font = { bold: true };
+      moveSheet.getRow(2).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE0E0E0' }
+      };
+
+      const movements = monthTransData.filter(t => t.type === 'in' || t.type === 'out');
+
+      movements.forEach((m: any) => {
+        const itemRef = Array.isArray(m.items) ? m.items[0] : m.items;
+        
+        moveSheet.addRow([
+          new Date(m.created_at).toLocaleString('en-GB', { 
+            day: '2-digit', month: '2-digit', year: 'numeric', 
+            hour: '2-digit', minute: '2-digit', second: '2-digit', 
+            hour12: true 
+          }).toUpperCase(),
+          itemRef?.name || 'Unknown',
+          m.type === 'in' ? 'In' : 'Out',
+          Math.abs(m.qty),
+          itemRef?.unit || '-',
+          m.destination?.name || '-'
+        ]);
+      });
+
+      moveSheet.columns = [
+        { width: 25 },
+        { width: 20 },
+        { width: 12 },
+        { width: 8 },
+        { width: 10 },
+        { width: 25 }
       ];
 
-      let rowTotalOut = 0;
+      // --- TAB 4: RESTAURANT OUT BREAKDOWN ---
+      const restSheet = workbook.addWorksheet('Restaurant Summary');
 
-      // Calculate quantity sent to each restaurant branch
+      restSheet.addRow([`RESTAURANT OUT BREAKDOWN: ${currentDivName} (${month})`]);
+      restSheet.mergeCells(1, 1, 1, 5 + allRestaurants.length); 
+      restSheet.getRow(1).font = { bold: true, size: 14 };
+
+      const restHeader = ['No', 'Item Name', 'Division', 'Unit'];
       allRestaurants.forEach((res: any) => {
-        const qtyToRes = itemOuts
-          .filter(t => t.destination_id === res.id)
+        restHeader.push(`📍 ${res.name}`);
+      });
+      restHeader.push('Unspecified / None', 'Total Sent');
+
+      restSheet.addRow(restHeader);
+      restSheet.getRow(2).font = { bold: true };
+      restSheet.getRow(2).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE0E0E0' }
+      };
+
+      items.forEach((item, index) => {
+        const itemOuts = monthTransData.filter(t => t.item_id === item.id && t.type === 'out');
+
+        const rowData: any[] = [
+          index + 1,
+          item.name,
+          item.divisions?.name || '-',
+          item.unit || '-'
+        ];
+
+        let rowTotalOut = 0;
+
+        allRestaurants.forEach((res: any) => {
+          const qtyToRes = itemOuts
+            .filter(t => t.destination_id === res.id)
+            .reduce((sum, t) => sum + Math.abs(t.qty), 0);
+
+          rowData.push(qtyToRes);
+          rowTotalOut += qtyToRes;
+        });
+
+        const unassignedQty = itemOuts
+          .filter(t => !t.destination_id)
           .reduce((sum, t) => sum + Math.abs(t.qty), 0);
 
-        rowData.push(qtyToRes);
-        rowTotalOut += qtyToRes;
+        rowData.push(unassignedQty);
+        rowTotalOut += unassignedQty;
+
+        rowData.push(rowTotalOut);
+
+        restSheet.addRow(rowData);
       });
 
-      // Calculate OUT quantity with no destination assigned
-      const unassignedQty = itemOuts
-        .filter(t => !t.destination_id)
-        .reduce((sum, t) => sum + Math.abs(t.qty), 0);
-
-      rowData.push(unassignedQty);
-      rowTotalOut += unassignedQty;
-
-      rowData.push(rowTotalOut);
-
-      restSheet.addRow(rowData);
-    });
-
-    // Auto-apply thin borders to all non-empty cells across all sheets
-    workbook.worksheets.forEach(sheet => {
-      sheet.eachRow({ includeEmpty: false }, (row) => {
-        row.eachCell({ includeEmpty: false }, (cell) => {
-          cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+      workbook.worksheets.forEach(sheet => {
+        sheet.eachRow({ includeEmpty: false }, (row) => {
+          row.eachCell({ includeEmpty: false }, (cell) => {
+            cell.border = { top: {style:'thin'}, left: {style:'thin'}, bottom: {style:'thin'}, right: {style:'thin'} };
+          });
         });
       });
-    });
 
-    const buffer = await workbook.xlsx.writeBuffer();
-    saveAs(new Blob([buffer]), `Inventory_Report_${currentDivName.replace(/\s+/g, '_')}_${month}.xlsx`);
-    
-  } catch (err) {
-    console.error(err);
-    alert("Export failed. Check console for details.");
-  } finally {
-    setLoading(false);
-  }
-}
-async function handleAdminPasswordChange() {
-  if (!targetUserId || !newPassword) return alert("Select a user and type a password");
-
-  const { data, error } = await supabase.rpc('admin_change_password', {
-    target_user_id: targetUserId,
-    new_password: newPassword
-  });
-
-  if (error) {
-    setAdminMsg("Error: " + error.message);
-  } else {
-    setAdminMsg("Success: Password changed!");
-    setNewPassword(''); // Clear the input
-  }
-}
-async function updateTransactionDestination(transactionId: any, newDestinationId: any) {
-  try {
-    const { error } = await supabase
-      .from('transactions')
-      .update({ destination_id: newDestinationId || null }) 
-      .eq('id', transactionId);
-
-    if (error) throw error;
-
-    // Refresh the feed
-    alert("Destination updated successfully");
-    fetchTransactions(search); 
-    setEditingDestId(null); // Close the selector after success
-  } catch (error: any) {
-    console.error("Error updating destination:", error.message);
-    alert("Failed to update destination: " + error.message);
-  }
-}
-async function updateTransactionDate(transactionId: any, newDateString: string) {
-  // Security check: Only allow super-admin (or add 'admin' if you use that role too)
-  if (profile?.role !== 'super-admin') {
-    alert("Access Denied: Only administrators can edit transaction timestamps.");
-    return;
+      const buffer = await workbook.xlsx.writeBuffer();
+      saveAs(new Blob([buffer]), `Inventory_Report_${currentDivName.replace(/\s+/g, '_')}_${month}.xlsx`);
+      
+    } catch (err) {
+      console.error(err);
+      alert("Export failed. Check console for details.");
+    } finally {
+      setLoading(false);
+    }
   }
 
-  try {
-    // Convert the local datetime string back to standard ISO format for Supabase
-    const isoDate = new Date(newDateString).toISOString();
+  async function updateTransactionDestination(transactionId: any, newDestinationId: any) {
+    try {
+      const { error } = await supabase
+        .from('transactions')
+        .update({ destination_id: newDestinationId || null }) 
+        .eq('id', transactionId);
 
-    const { error } = await supabase
-      .from('transactions')
-      .update({ created_at: isoDate }) 
-      .eq('id', transactionId);
+      if (error) throw error;
 
-    if (error) throw error;
-
-    fetchTransactions(search); 
-    setEditingDateId(null); 
-  } catch (error: any) {
-    console.error("Error updating date:", error.message);
-    alert("Failed to update date: " + error.message);
-  }
-}
-async function updateTransactionQty(transaction: any, newValueStr: string) {
-  // Security check: Only Admins
-  if (profile?.role !== 'super-admin') {
-    alert("Access Denied: Only administrators can edit quantities.");
-    return;
+      alert("Destination updated successfully");
+      fetchTransactions(search); 
+      setEditingDestId(null);
+    } catch (error: any) {
+      console.error("Error updating destination:", error.message);
+      alert("Failed to update destination: " + error.message);
+    }
   }
 
-  const newQty = Number(newValueStr);
-  if (isNaN(newQty)) return;
+  async function updateTransactionDate(transactionId: any, newDateString: string) {
+    if (profile?.role !== 'super-admin') {
+      alert("Access Denied: Only administrators can edit transaction timestamps.");
+      return;
+    }
 
-  // The math: Difference between what it SHOULD be vs what it WAS
-  const oldQty = transaction.qty;
-  const delta = newQty - oldQty;
+    try {
+      const isoDate = new Date(newDateString).toISOString();
 
-  // If nothing changed, just close the editor
-  if (delta === 0) {
-    setEditingQtyId(null);
-    return;
+      const { error } = await supabase
+        .from('transactions')
+        .update({ created_at: isoDate }) 
+        .eq('id', transactionId);
+
+      if (error) throw error;
+
+      fetchTransactions(search); 
+      setEditingDateId(null); 
+    } catch (error: any) {
+      console.error("Error updating date:", error.message);
+      alert("Failed to update date: " + error.message);
+    }
   }
 
-  try {
-    // 1. Fetch the absolute latest stock for this item to avoid sync errors
-    const { data: itemData, error: itemError } = await supabase
-      .from('items')
-      .select('stock')
-      .eq('id', transaction.item_id)
-      .single();
+  async function updateTransactionQty(transaction: any, newValueStr: string) {
+    if (profile?.role !== 'super-admin') {
+      alert("Access Denied: Only administrators can edit quantities.");
+      return;
+    }
 
-    if (itemError) throw itemError;
+    const newQty = Number(newValueStr);
+    if (isNaN(newQty)) return;
 
-    const newStock = itemData.stock + delta;
+    const oldQty = transaction.qty;
+    const delta = newQty - oldQty;
 
-    // 2. Update the master Item stock
-    const { error: updateItemError } = await supabase
-      .from('items')
-      .update({ stock: newStock })
-      .eq('id', transaction.item_id);
+    if (delta === 0) {
+      setEditingQtyId(null);
+      return;
+    }
 
-    if (updateItemError) throw updateItemError;
+    try {
+      const { data: itemData, error: itemError } = await supabase
+        .from('items')
+        .select('stock')
+        .eq('id', transaction.item_id)
+        .single();
 
-    // 3. Update the Transaction record
-    const { error: updateTxError } = await supabase
-      .from('transactions')
-      .update({ qty: newQty })
-      .eq('id', transaction.id);
+      if (itemError) throw itemError;
 
-    if (updateTxError) throw updateTxError;
+      const newStock = itemData.stock + delta;
 
-    // Refresh the feed
-    fetchTransactions(search); 
-    setEditingQtyId(null);
-    
-    alert("Quantity updated! Note: You may need to refresh the page to see the updated stock in the top item cards.");
+      const { error: updateItemError } = await supabase
+        .from('items')
+        .update({ stock: newStock })
+        .eq('id', transaction.item_id);
 
-  } catch (error: any) {
-    console.error("Error updating quantity:", error.message);
-    alert("Failed to update quantity: " + error.message);
+      if (updateItemError) throw updateItemError;
+
+      const { error: updateTxError } = await supabase
+        .from('transactions')
+        .update({ qty: newQty })
+        .eq('id', transaction.id);
+
+      if (updateTxError) throw updateTxError;
+
+      fetchTransactions(search); 
+      setEditingQtyId(null);
+      
+      alert("Quantity updated! Note: You may need to refresh the page to see the updated stock in the top item cards.");
+
+    } catch (error: any) {
+      console.error("Error updating quantity:", error.message);
+      alert("Failed to update quantity: " + error.message);
+    }
   }
-}
-//----UI Starts Here--
-if (loading) return (
+
+  if (loading) return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 text-gray-400">
-        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mb-4"></div>
-        <p className="font-bold text-sm">LOADING APLUS CONTROL...</p>
+      <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mb-4"></div>
+      <p className="font-bold text-sm">LOADING APLUS CONTROL...</p>
     </div>
-  )
+  );
 
   if (!user) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-gray-100 p-4">
         <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-sm">
           <div className="text-center mb-8">
-             <h2 className="text-3xl font-black text-blue-600 italic">APLUS</h2>
-             <p className="text-gray-400 text-sm">Inventory System</p>
+            <h2 className="text-3xl font-black text-blue-600 italic">APLUS</h2>
+            <p className="text-gray-400 text-sm">Inventory System</p>
           </div>
           <div className="flex flex-col gap-4">
             <input type="text" placeholder="Username" value={username} onChange={(e) => setUsername(e.target.value.toLowerCase())} className="border p-2 rounded text-black outline-blue-500" onKeyDown={(e) => e.key === 'Enter' && handleLogin()} />
@@ -805,7 +776,7 @@ if (loading) return (
       <div className="flex justify-between items-center mb-6 bg-white p-4 rounded-xl shadow-sm border">
         <div>
           <h1 className="text-xl font-bold text-gray-800">
-             {profile?.role === 'super-admin' ? 'HQ Master Controller' : `${profile?.restaurants?.name || 'Branch'} Dashboard`}
+            {profile?.role === 'super-admin' ? 'HQ Master Controller' : `${profile?.restaurants?.name || 'Branch'} Dashboard`}
           </h1>
           <p className="text-xs text-gray-500 font-bold uppercase tracking-widest">
             User: <span className="text-blue-600">{profile?.username}</span>
@@ -821,11 +792,11 @@ if (loading) return (
           <div className="lg:col-span-4">
             <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">Quick Add Item</label>
             <div className="flex gap-2">
-              <input value={newItem} onChange={(e) => setNewItem(e.target.value)} placeholder={profile?.role === 'managerharsa' ? "Locked" : "Name"} disabled={profile?.role === 'managerharsa'} // Lock input for staff 
+              <input value={newItem} onChange={(e) => setNewItem(e.target.value)} placeholder={profile?.role === 'managerharsa' ? "Locked" : "Name"} disabled={profile?.role === 'managerharsa'} 
                 className="border p-2.5 rounded-lg flex-1 text-sm bg-gray-50 outline-blue-500 text-black" />
               <input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="Unit" 
-              disabled={profile?.role === 'managerharsa'} // Lock input for staff 
-              className="border p-2.5 rounded-lg w-20 text-sm bg-gray-50 outline-blue-500 text-black" />
+                disabled={profile?.role === 'managerharsa'} 
+                className="border p-2.5 rounded-lg w-20 text-sm bg-gray-50 outline-blue-500 text-black" />
               <button onClick={addNewItem} className="bg-blue-600 text-white px-4 py-2.5 rounded-lg font-bold text-sm">Add</button>
             </div>
           </div>
@@ -855,22 +826,22 @@ if (loading) return (
                 onChange={(e) => {
                   const val = e.target.value;
                   setSearch(val);
-                  fetchTransactions(val); // Trigger database search on change
+                  fetchTransactions(val);
                 }} 
                 placeholder="Search..." 
                 className="w-full border p-2.5 rounded-lg text-sm bg-gray-50 outline-blue-500 text-black" 
               />
             </div>
-          <button 
-            onClick={() => setShowEmptyOnly(!showEmptyOnly)}
-            className={`px-3 py-1.5 rounded-md text-[10px] font-black transition-all shadow-sm border uppercase tracking-tight ${
-              showEmptyOnly 
-              ? 'bg-red-600 text-white border-red-700' 
-              : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
-            }`}
-          >
-            {showEmptyOnly ? 'Show All' : 'Low Stock'}
-          </button>   
+            <button 
+              onClick={() => setShowEmptyOnly(!showEmptyOnly)}
+              className={`px-3 py-1.5 rounded-md text-[10px] font-black transition-all shadow-sm border uppercase tracking-tight ${
+                showEmptyOnly 
+                ? 'bg-red-600 text-white border-red-700' 
+                : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
+              }`}
+            >
+              {showEmptyOnly ? 'Show All' : 'Low Stock'}
+            </button>   
             <div className="flex-none">
               <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">Report</label>
               <div className="flex gap-1">
@@ -882,154 +853,228 @@ if (loading) return (
         </div>
       </div>
 
-        {/* Item List */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
-          {items
-            .filter((i: any) => {
-              const matchesSearch = i.name.toLowerCase().includes(search.toLowerCase());
-              const matchesStock = showEmptyOnly ? i.stock <= 2 : true;
-              return matchesSearch && matchesStock;
-            })
-            .map((item: any) => (
-            <div key={item.id} className="bg-white border p-4 rounded-xl flex flex-col gap-3 shadow-sm hover:shadow-md transition-all">
-              <div className="flex justify-between items-start">
-                <div className="w-full">
-                  {editingId === item.id ? (
-                    <div className="flex flex-col gap-2 mb-2">
-                      <input 
-                        className="border p-1 rounded text-sm font-bold w-full text-black outline-blue-500"
-                        value={editName}
-                        onChange={(e) => setEditName(e.target.value)}
-                        autoFocus
-                      />
-                      <input 
-                        className="border p-1 rounded text-xs w-20 text-black outline-blue-500"
-                        value={editUnit}
-                        onChange={(e) => setEditUnit(e.target.value)}
-                      />
-                      <div className="flex gap-2">
-                        <button onClick={() => updateItem(item.id)} className="text-[10px] bg-blue-600 text-white px-2 py-1 rounded font-bold">Save</button>
-                        <button onClick={() => setEditingId(null)} className="text-[10px] bg-gray-400 text-white px-2 py-1 rounded font-bold">Cancel</button>
+      {/* Item List */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
+        {items
+          .filter((i: any) => {
+            const matchesSearch = i.name.toLowerCase().includes(search.toLowerCase());
+            const matchesStock = showEmptyOnly ? i.stock <= 2 : true;
+            return matchesSearch && matchesStock;
+          })
+          .map((item: any) => (
+          <div key={item.id} className="bg-white border p-4 rounded-xl flex flex-col gap-3 shadow-sm hover:shadow-md transition-all">
+            <div className="flex justify-between items-start">
+              <div className="w-full">
+                {editingId === item.id ? (
+                  <div className="flex flex-col gap-2 mb-2">
+                    <input 
+                      className="border p-1 rounded text-sm font-bold w-full text-black outline-blue-500"
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      autoFocus
+                    />
+                    <input 
+                      className="border p-1 rounded text-xs w-20 text-black outline-blue-500"
+                      value={editUnit}
+                      onChange={(e) => setEditUnit(e.target.value)}
+                    />
+                    <div className="flex gap-2">
+                      <button onClick={() => updateItem(item.id)} className="text-[10px] bg-blue-600 text-white px-2 py-1 rounded font-bold">Save</button>
+                      <button onClick={() => setEditingId(null)} className="text-[10px] bg-gray-400 text-white px-2 py-1 rounded font-bold">Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <div className="font-bold text-gray-800 text-lg leading-tight uppercase">{item.name}</div>
+                    
+                    {profile?.role === 'super-admin' && (
+                      <div className="flex gap-1">
+                        <button 
+                          onClick={() => {
+                            setEditingId(item.id);
+                            setEditName(item.name);
+                            setEditUnit(item.unit);
+                          }}
+                          className="text-blue-400 hover:text-blue-600 p-1 transition-colors"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                          </svg>
+                        </button>
+                        <button onClick={() => deleteItem(item.id, item.name)} className="text-red-300 hover:text-red-600 p-1 transition-colors">
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </button>
                       </div>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <div className="font-bold text-gray-800 text-lg leading-tight uppercase">{item.name}</div>
-                      
-                      {profile?.role === 'super-admin' && (
-                        <div className="flex gap-1">
-                          <button 
-                            onClick={() => {
-                              setEditingId(item.id);
-                              setEditName(item.name);
-                              setEditUnit(item.unit);
-                            }}
-                            className="text-blue-400 hover:text-blue-600 p-1 transition-colors"
-                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                            </svg>
-                          </button>
-                          <button onClick={() => deleteItem(item.id, item.name)} className="text-red-300 hover:text-red-600 p-1 transition-colors">
-                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                            </svg>
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  
-                  {editingId !== item.id && (
-                    <div className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">
-                        {item.divisions?.restaurants?.name} — {item.divisions?.name}
-                    </div>
-                  )}
-                </div>
-
+                    )}
+                  </div>
+                )}
+                
                 {editingId !== item.id && (
-                  <div className="text-2xl font-black text-blue-600 ml-2">
-                    {item.stock} <span className="text-xs font-normal text-gray-400">{item.unit}</span>
+                  <div className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">
+                      {item.divisions?.restaurants?.name} — {item.divisions?.name}
                   </div>
                 )}
               </div>
-              
-              <div className="flex flex-col gap-2 bg-gray-50 p-2 rounded-lg mt-auto">
-                <div className="flex flex-col px-1">
-                  <label className="text-[9px] font-black text-gray-400 uppercase tracking-tighter">Destination</label>
-                  <select 
-                    value={destMap[item.id] || ''} 
-                    onChange={(e) => setDestMap({...destMap, [item.id]: e.target.value})}
-                    className="text-[10px] p-1 bg-white border rounded border-gray-200 outline-blue-500 font-bold text-gray-700"
-                  >
-                    <option value="">-- Select Destination --</option>
-                    {allRestaurants.map((res: any) => (
-                      <option key={res.id} value={res.id}>
-                        {res.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
 
-                <div className="flex gap-1 items-center">
-                  <input 
-                    type="number" 
-                    value={qtyMap[item.id] || ''} 
-                    onChange={(e) => setQtyMap({...qtyMap, [item.id]: e.target.value})} 
-                    onKeyDown={(e) => { if (e.key === '-') e.preventDefault(); }} 
-                    className="border w-full p-2 text-center rounded-lg font-bold outline-blue-500 text-black" 
-                    min="1" 
-                    placeholder="Qty" 
-                  />
-                  <button 
-                    onClick={() => updateStock(item.id, Math.abs(Number(qtyMap[item.id])), destMap[item.id])} 
-                    className="bg-green-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-green-600"
-                  >
-                    IN
-                  </button>
-                  <button 
-                    onClick={() => updateStock(item.id, -Math.abs(Number(qtyMap[item.id])), destMap[item.id])} 
-                    className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-600"
-                  >
-                    OUT
-                  </button>
-                  
-                  {(profile?.role === 'super-admin' || profile?.role === 'manager') && (
-                    <button 
-                      onClick={() => adjustStock(item.id, qtyMap[item.id])} 
-                      className="bg-amber-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-amber-600"
-                    >
-                      ADJ
-                    </button>
-                  )}
+              {editingId !== item.id && (
+                <div className="text-2xl font-black text-blue-600 ml-2">
+                  {item.stock} <span className="text-xs font-normal text-gray-400">{item.unit}</span>
                 </div>
+              )}
+            </div>
+            
+            <div className="flex flex-col gap-2 bg-gray-50 p-2 rounded-lg mt-auto">
+              <div className="flex flex-col px-1">
+                <label className="text-[9px] font-black text-gray-400 uppercase tracking-tighter">Destination</label>
+                <select 
+                  value={destMap[item.id] || ''} 
+                  onChange={(e) => setDestMap({...destMap, [item.id]: e.target.value})}
+                  className="text-[10px] p-1 bg-white border rounded border-gray-200 outline-blue-500 font-bold text-gray-700"
+                >
+                  <option value="">-- Select Destination --</option>
+                  {allRestaurants.map((res: any) => (
+                    <option key={res.id} value={res.id}>
+                      {res.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex gap-1 items-center">
+                <input 
+                  type="number" 
+                  value={qtyMap[item.id] || ''} 
+                  onChange={(e) => setQtyMap({...qtyMap, [item.id]: e.target.value})} 
+                  onKeyDown={(e) => { if (e.key === '-') e.preventDefault(); }} 
+                  className="border w-full p-2 text-center rounded-lg font-bold outline-blue-500 text-black" 
+                  min="1" 
+                  placeholder="Qty" 
+                />
+                <button 
+                  onClick={() => updateStock(item.id, Math.abs(Number(qtyMap[item.id])), destMap[item.id])} 
+                  className="bg-green-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-green-600"
+                >
+                  IN
+                </button>
+                <button 
+                  onClick={() => updateStock(item.id, -Math.abs(Number(qtyMap[item.id])), destMap[item.id])} 
+                  className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-600"
+                >
+                  OUT
+                </button>
+                
+                {(profile?.role === 'super-admin' || profile?.role === 'manager') && (
+                  <button 
+                    onClick={() => adjustStock(item.id, qtyMap[item.id])} 
+                    className="bg-amber-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-amber-600"
+                  >
+                    ADJ
+                  </button>
+                )}
               </div>
             </div>
-          ))}
-        </div>
-      
+          </div>
+        ))}
+      </div>
+    
       {/* Activity Feed */}
-        <div className="mt-10 mb-20">
-          <h2 className="text-sm font-black text-gray-400 uppercase tracking-widest mb-4">
-            {search ? `Activity for "${search}"` : 'Recent Activity'}
-          </h2>
-          <div className="bg-white border rounded-2xl overflow-hidden shadow-sm">
-            {transactions.length === 0 && (
-                <p className="p-8 text-center text-gray-400 text-sm italic">No matching transactions.</p>
+      <div className="mt-10 mb-20">
+        <div className="flex flex-wrap justify-between items-center gap-4 mb-4">
+          <div>
+            <h2 className="text-sm font-black text-gray-400 uppercase tracking-widest">
+              {search ? `Activity for "${search}"` : 'Recent Activity'}
+            </h2>
+            {activityMonth && (
+              <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-100">
+                📅 Showing {activityMonth}
+              </span>
             )}
+          </div>
 
-            {transactions.map((t: any) => {
-                const itemRef = Array.isArray(t.items) ? t.items[0] : t.items;
-                const profileData = t.author || (Array.isArray(t.profiles) ? t.profiles[0] : t.profiles);
-                const displayUser = profileData?.username || 'System';
-                const destName = t.destination?.name;
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Month Filter */}
+            <div className="flex items-center gap-1">
+              <input 
+                type="month" 
+                value={activityMonth} 
+                onChange={(e) => {
+                  const selectedM = e.target.value;
+                  setActivityMonth(selectedM);
+                  fetchTransactions(search, false, selectedM);
+                }}
+                className="text-xs border p-1.5 rounded-lg bg-white outline-blue-500 font-bold text-gray-700 shadow-sm" 
+              />
+              {activityMonth && (
+                <button 
+                  onClick={() => {
+                    setActivityMonth('');
+                    fetchTransactions(search, false, '');
+                  }}
+                  className="text-[10px] text-red-500 font-bold hover:underline px-1"
+                  title="Clear Month Filter"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
 
-                return (
-                  <div key={t.id} className="text-sm p-4 border-b last:border-0 flex justify-between items-center hover:bg-gray-50">
-                    <div className="flex flex-col">
-                      <span className="font-bold text-gray-700">{itemRef?.name || 'Unknown Item'}</span>
-                      <div className="flex flex-wrap items-center gap-2 mt-0.5">
-                        {/* EDITABLE DATE/TIME */}
+            {/* Destination Filter Dropdown */}
+            <select 
+              value={activityDestFilter} 
+              onChange={(e) => setActivityDestFilter(e.target.value)}
+              className="text-xs border p-1.5 rounded-lg bg-white outline-blue-500 font-bold text-gray-700 shadow-sm"
+            >
+              <option value="all">📍 All Destinations</option>
+              <option value="none">📍 Unspecified / None</option>
+              {allRestaurants.map((res: any) => (
+                <option key={res.id} value={res.id}>
+                  📍 {res.name}
+                </option>
+              ))}
+            </select>
+
+            {/* Time Order Dropdown */}
+            <select 
+              value={activityTimeSort} 
+              onChange={(e) => setActivityTimeSort(e.target.value as 'newest' | 'oldest')}
+              className="text-xs border p-1.5 rounded-lg bg-white outline-blue-500 font-bold text-gray-700 shadow-sm"
+            >
+              <option value="newest">⏱️ Newest First</option>
+              <option value="oldest">⏱️ Oldest First</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="bg-white border rounded-2xl overflow-hidden shadow-sm">
+          {transactions.length === 0 && (
+            <p className="p-8 text-center text-gray-400 text-sm italic">No matching transactions.</p>
+          )}
+
+          {[...transactions]
+            .filter((t: any) => {
+              if (activityDestFilter === 'all') return true;
+              if (activityDestFilter === 'none') return !t.destination_id;
+              return t.destination_id === activityDestFilter;
+            })
+            .sort((a, b) => {
+              const timeA = new Date(a.created_at).getTime();
+              const timeB = new Date(b.created_at).getTime();
+              return activityTimeSort === 'oldest' ? timeA - timeB : timeB - timeA;
+            })
+            .map((t: any) => {
+              const itemRef = Array.isArray(t.items) ? t.items[0] : t.items;
+              const profileData = t.author || (Array.isArray(t.profiles) ? t.profiles[0] : t.profiles);
+              const displayUser = profileData?.username || 'System';
+              const destName = t.destination?.name;
+
+              return (
+                <div key={t.id} className="text-sm p-4 border-b last:border-0 flex justify-between items-center hover:bg-gray-50">
+                  <div className="flex flex-col">
+                    <span className="font-bold text-gray-700">{itemRef?.name || 'Unknown Item'}</span>
+                    <div className="flex flex-wrap items-center gap-2 mt-0.5">
+                      {/* EDITABLE DATE/TIME */}
                       {editingDateId === t.id ? (
                         <div className="flex items-center gap-1">
                           <input 
@@ -1056,13 +1101,9 @@ if (loading) return (
                           onClick={() => {
                             if (profile?.role === 'super-admin') {
                               setEditingDateId(t.id);
-                              
-                              // This math formats the database UTC time into your local timezone 
-                              // so the HTML datetime-local input can read it correctly
                               const dateObj = new Date(t.created_at);
                               const tzOffset = dateObj.getTimezoneOffset() * 60000;
                               const localISOTime = (new Date(dateObj.getTime() - tzOffset)).toISOString().slice(0, 16);
-                              
                               setEditDateValue(localISOTime);
                             }
                           }}
@@ -1077,98 +1118,99 @@ if (loading) return (
                         </span>
                       )}
                         
-                        <span className="text-[9px] font-black bg-blue-50 text-blue-500 px-1.5 py-0.5 rounded uppercase border border-blue-100">
-                          👤 {displayUser}
-                        </span>
-
-                        {/* EDITABLE DESTINATION BADGE */}
-                        {editingDestId === t.id ? (
-                          <div className="flex items-center gap-1">
-                            <select 
-                              className="text-[9px] font-black border rounded bg-white p-0.5 outline-blue-500"
-                              value={t.destination_id || ""}
-                              onChange={(e) => updateTransactionDestination(t.id, e.target.value)}
-                            >
-                              <option value="">None</option>
-                              {allRestaurants.map((res: any) => (
-                                <option key={res.id} value={res.id}>
-                                  {res.name}
-                                </option>
-                              ))}
-                            </select>
-                            <button 
-                              onClick={() => setEditingDestId(null)} 
-                              className="text-[9px] text-gray-400 font-bold hover:text-red-500 ml-1"
-                            >
-                              ✕
-                            </button>
-                          </div>
-                        ) : (
-                          <button 
-                            onClick={() => profile?.role === 'super-admin' && setEditingDestId(t.id)}
-                            className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase border transition-all ${
-                              destName 
-                              ? 'bg-purple-50 text-purple-600 border-purple-100 hover:bg-purple-100' 
-                              : 'bg-gray-50 text-gray-400 border-gray-100 hover:border-gray-300 italic'
-                            } ${profile?.role !== 'super-admin' && 'cursor-default'}`}
-                          >
-                            📍 TO: {destName || 'Set Destination'}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    
-                    {/* EDITABLE QUANTITY BADGE */}
-                    {editingQtyId === t.id ? (
-                      <div className="flex items-center gap-1">
-                        <input 
-                          type="number" 
-                          className="w-16 text-[10px] font-black border border-blue-300 rounded p-1 outline-blue-500 text-center text-black"
-                          value={editQtyValue}
-                          onChange={(e) => setEditQtyValue(e.target.value)}
-                        />
-                        <button 
-                          onClick={() => updateTransactionQty(t, editQtyValue)}
-                          className="text-[9px] bg-blue-500 hover:bg-blue-600 text-white px-2 py-1 rounded font-bold transition-colors"
-                        >
-                          Save
-                        </button>
-                        <button 
-                          onClick={() => setEditingQtyId(null)} 
-                          className="text-[9px] text-gray-400 font-bold hover:text-red-500 ml-1"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    ) : (
-                      <span 
-                        onClick={() => {
-                          if (profile?.role === 'super-admin') {
-                            setEditingQtyId(t.id);
-                            setEditQtyValue(t.qty.toString());
-                          }
-                        }}
-                        className={`font-black px-3 py-1 rounded-full text-[10px] transition-all border border-transparent ${
-                          profile?.role === 'super-admin' ? 'cursor-pointer hover:border-current hover:opacity-80' : ''
-                        } ${
-                          t.type === 'in' ? 'bg-green-100 text-green-700' : 
-                          t.type === 'adjustment' ? 'bg-amber-100 text-amber-700' : 
-                          'bg-red-100 text-red-700'
-                        }`}
-                        title={profile?.role === 'super-admin' ? "Click to edit quantity" : ""}
-                      >
-                        {t.type.toUpperCase()} {' '}
-                        {t.type === 'adjustment' 
-                          ? (t.qty - t.prev_qty > 0 ? `+${t.qty - t.prev_qty}` : t.qty - t.prev_qty)
-                          : (t.qty > 0 ? `+${t.qty}` : t.qty)
-                        }
+                      <span className="text-[9px] font-black bg-blue-50 text-blue-500 px-1.5 py-0.5 rounded uppercase border border-blue-100">
+                        👤 {displayUser}
                       </span>
-                    )}
+
+                      {/* EDITABLE DESTINATION BADGE */}
+                      {editingDestId === t.id ? (
+                        <div className="flex items-center gap-1">
+                          <select 
+                            className="text-[9px] font-black border rounded bg-white p-0.5 outline-blue-500"
+                            value={t.destination_id || ""}
+                            onChange={(e) => updateTransactionDestination(t.id, e.target.value)}
+                          >
+                            <option value="">None</option>
+                            {allRestaurants.map((res: any) => (
+                              <option key={res.id} value={res.id}>
+                                {res.name}
+                              </option>
+                            ))}
+                          </select>
+                          <button 
+                            onClick={() => setEditingDestId(null)} 
+                            className="text-[9px] text-gray-400 font-bold hover:text-red-500 ml-1"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <button 
+                          onClick={() => profile?.role === 'super-admin' && setEditingDestId(t.id)}
+                          className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase border transition-all ${
+                            destName 
+                            ? 'bg-purple-50 text-purple-600 border-purple-100 hover:bg-purple-100' 
+                            : 'bg-gray-50 text-gray-400 border-gray-100 hover:border-gray-300 italic'
+                          } ${profile?.role !== 'super-admin' && 'cursor-default'}`}
+                        >
+                          📍 TO: {destName || 'Set Destination'}
+                        </button>
+                      )}
+                    </div>
                   </div>
-                );
-              })}
-          </div>
+                  
+                  {/* EDITABLE QUANTITY BADGE */}
+                  {editingQtyId === t.id ? (
+                    <div className="flex items-center gap-1">
+                      <input 
+                        type="number" 
+                        className="w-16 text-[10px] font-black border border-blue-300 rounded p-1 outline-blue-500 text-center text-black"
+                        value={editQtyValue}
+                        onChange={(e) => setEditQtyValue(e.target.value)}
+                      />
+                      <button 
+                        onClick={() => updateTransactionQty(t, editQtyValue)}
+                        className="text-[9px] bg-blue-500 hover:bg-blue-600 text-white px-2 py-1 rounded font-bold transition-colors"
+                      >
+                        Save
+                      </button>
+                      <button 
+                        onClick={() => setEditingQtyId(null)} 
+                        className="text-[9px] text-gray-400 font-bold hover:text-red-500 ml-1"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <span 
+                      onClick={() => {
+                        if (profile?.role === 'super-admin') {
+                          setEditingQtyId(t.id);
+                          setEditQtyValue(t.qty.toString());
+                        }
+                      }}
+                      className={`font-black px-3 py-1 rounded-full text-[10px] transition-all border border-transparent ${
+                        profile?.role === 'super-admin' ? 'cursor-pointer hover:border-current hover:opacity-80' : ''
+                      } ${
+                        t.type === 'in' ? 'bg-green-100 text-green-700' : 
+                        t.type === 'adjustment' ? 'bg-amber-100 text-amber-700' : 
+                        'bg-red-100 text-red-700'
+                      }`}
+                      title={profile?.role === 'super-admin' ? "Click to edit quantity" : ""}
+                    >
+                      {t.type.toUpperCase()} {' '}
+                      {t.type === 'adjustment' 
+                        ? (t.qty - t.prev_qty > 0 ? `+${t.qty - t.prev_qty}` : t.qty - t.prev_qty)
+                        : (t.qty > 0 ? `+${t.qty}` : t.qty)
+                      }
+                    </span>
+                  )}
+                </div>
+              );
+            })}
         </div>
+      </div>
+
       {hasMore && transactions.length > 0 && (
         <div className="p-4 border-t bg-gray-50 flex justify-center">
           <button 
