@@ -39,6 +39,7 @@ export default function Home() {
   const [editingDestId, setEditingDestId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
   const [editUnit, setEditUnit] = useState('')
+  const [editPrice, setEditPrice] = useState<string>('')
   const [editIsMeasured, setEditIsMeasured] = useState(false)
   const [editMeasuredUnit, setEditMeasuredUnit] = useState('kg')
   const [showEmptyOnly, setShowEmptyOnly] = useState(false)
@@ -60,7 +61,6 @@ export default function Home() {
   const [editingWeightId, setEditingWeightId] = useState<string | null>(null)
   const [editWeightValue, setEditWeightValue] = useState<string>('')
   const [measuredStockMap, setMeasuredStockMap] = useState<{ [key: string]: number }>({})
-
 
   // 1. Initial Load / Boot Sequence
   useEffect(() => {
@@ -184,99 +184,101 @@ export default function Home() {
   }
 
   async function fetchItems() {
-  if (!profile || (profile.role !== 'super-admin' && allDivisions.length === 0)) {
-    return;
-  }
-  
-  let query = supabase
-    .from('items')
-    .select('*, divisions!inner(name, restaurant_id, restaurants(name))')
-    .order('name');
-  
-  if (selectedDivision !== 'all') {
-    query = query.eq('division_id', selectedDivision);
-  } else if (profile.role !== 'super-admin') {
-    const authorizedIds = allDivisions.map(d => d.id);
-    query = query.in('division_id', authorizedIds);
-  }
-
-  const { data, error } = await query;
-  if (error) {
-    console.error("Fetch Error:", error.message);
-  } else {
-    setItems(data || []);
-
-    // Fetch measured totals (kg) per item
-    const { data: txMeasured } = await supabase
-      .from('transactions')
-      .select('item_id, type, measured_qty')
-      .not('measured_qty', 'is', null);
-
-    const weightMap: { [key: string]: number } = {};
-    (txMeasured || []).forEach((t: any) => {
-      const mQty = Number(t.measured_qty) || 0;
-      if (!weightMap[t.item_id]) weightMap[t.item_id] = 0;
-      if (t.type === 'in') {
-        weightMap[t.item_id] += mQty;
-      } else if (t.type === 'out') {
-        weightMap[t.item_id] -= mQty;
-      }
-    });
-    setMeasuredStockMap(weightMap);
-  }
-}
-async function updateTransactionWeight(transaction: any, newValueStr: string) {
-  if (profile?.role !== 'super-admin') {
-    alert("Access Denied: Only administrators can edit transaction weights.");
-    return;
-  }
-
-  const newWeight = newValueStr === '' ? null : Number(newValueStr);
-  if (newWeight !== null && (isNaN(newWeight) || newWeight < 0)) return;
-
-  const { data: itemData } = await supabase
-    .from('items')
-    .select('is_measured')
-    .eq('id', transaction.item_id)
-    .single();
-
-  const isDualUnit = Boolean(itemData?.is_measured);
-  const unitCost = Number(transaction.unit_cost) || 0;
-  
-  let newTotalCost: number | null = transaction.total_cost;
-  if (isDualUnit) {
-    newTotalCost = (newWeight !== null && unitCost > 0) ? unitCost * newWeight : null;
-  } else {
-    newTotalCost = unitCost > 0 ? unitCost * Math.abs(Number(transaction.qty)) : null;
-  }
-
-  try {
-    const { error: txErr } = await supabase
-      .from('transactions')
-      .update({ 
-        measured_qty: newWeight,
-        total_cost: newTotalCost 
-      })
-      .eq('id', transaction.id);
-
-    if (txErr) throw txErr;
-
-    if (transaction.type === 'in') {
-      await supabase
-        .from('inventory_batches')
-        .update({ remaining_measured_qty: newWeight })
-        .eq('transaction_id', transaction.id);
+    if (!profile || (profile.role !== 'super-admin' && allDivisions.length === 0)) {
+      return;
+    }
+    
+    let query = supabase
+      .from('items')
+      .select('*, divisions!inner(name, restaurant_id, restaurants(name))')
+      .order('name');
+    
+    if (selectedDivision !== 'all') {
+      query = query.eq('division_id', selectedDivision);
+    } else if (profile.role !== 'super-admin') {
+      const authorizedIds = allDivisions.map(d => d.id);
+      query = query.in('division_id', authorizedIds);
     }
 
-    fetchTransactions(search);
-    fetchItems();
-    setEditingWeightId(null);
-    alert("Weight (kg) updated and cost recalculated successfully!");
-  } catch (error: any) {
-    console.error("Error updating weight:", error.message);
-    alert("Failed to update weight: " + error.message);
+    const { data, error } = await query;
+    if (error) {
+      console.error("Fetch Error:", error.message);
+    } else {
+      setItems(data || []);
+
+      // Fetch measured totals (kg) per item
+      const { data: txMeasured } = await supabase
+        .from('transactions')
+        .select('item_id, type, measured_qty')
+        .not('measured_qty', 'is', null);
+
+      const weightMap: { [key: string]: number } = {};
+      (txMeasured || []).forEach((t: any) => {
+        const mQty = Number(t.measured_qty) || 0;
+        if (!weightMap[t.item_id]) weightMap[t.item_id] = 0;
+        if (t.type === 'in') {
+          weightMap[t.item_id] += mQty;
+        } else if (t.type === 'out') {
+          weightMap[t.item_id] -= mQty;
+        }
+      });
+      setMeasuredStockMap(weightMap);
+    }
   }
-}
+
+  async function updateTransactionWeight(transaction: any, newValueStr: string) {
+    if (profile?.role !== 'super-admin') {
+      alert("Access Denied: Only administrators can edit transaction weights.");
+      return;
+    }
+
+    const newWeight = newValueStr === '' ? null : Number(newValueStr);
+    if (newWeight !== null && (isNaN(newWeight) || newWeight < 0)) return;
+
+    const { data: itemData } = await supabase
+      .from('items')
+      .select('is_measured')
+      .eq('id', transaction.item_id)
+      .single();
+
+    const isDualUnit = Boolean(itemData?.is_measured);
+    const unitCost = Number(transaction.unit_cost) || 0;
+    
+    let newTotalCost: number | null = transaction.total_cost;
+    if (isDualUnit) {
+      newTotalCost = (newWeight !== null && unitCost > 0) ? unitCost * newWeight : null;
+    } else {
+      newTotalCost = unitCost > 0 ? unitCost * Math.abs(Number(transaction.qty)) : null;
+    }
+
+    try {
+      const { error: txErr } = await supabase
+        .from('transactions')
+        .update({ 
+          measured_qty: newWeight,
+          total_cost: newTotalCost 
+        })
+        .eq('id', transaction.id);
+
+      if (txErr) throw txErr;
+
+      if (transaction.type === 'in') {
+        await supabase
+          .from('inventory_batches')
+          .update({ remaining_measured_qty: newWeight })
+          .eq('transaction_id', transaction.id);
+      }
+
+      fetchTransactions(search);
+      fetchItems();
+      setEditingWeightId(null);
+      alert("Weight (kg) updated and cost recalculated successfully!");
+    } catch (error: any) {
+      console.error("Error updating weight:", error.message);
+      alert("Failed to update weight: " + error.message);
+    }
+  }
+
   async function fetchTransactions(searchQuery = search, isLoadMore = false, monthFilter = activityMonth) {
     if (!user || !profile) return;
 
@@ -379,105 +381,25 @@ async function updateTransactionWeight(transaction: any, newValueStr: string) {
   }
 
   async function updateStock(itemId: string, numQty: number, destId?: string) {
-  if (!numQty || numQty === 0) return;
+    if (!numQty || numQty === 0) return;
 
-  const rawInput = Number(qtyMap[itemId]); 
-  if (rawInput < 0) {
-    alert("Please enter a positive number. Use 'OUT' to subtract.");
-    return; 
-  }
-
-  const item = items.find(i => i.id === itemId);
-  const isDualUnit = Boolean(item?.is_measured);
-  const measuredVal = isDualUnit ? (Number(measuredQtyMap[itemId]) || null) : null;
-  let unitCostVal = Number(buyPriceMap[itemId]) || null;
-  const currentStock = item?.stock || 0;
-
-  // --- OUT Movement (FIFO execution) ---
-  if (numQty < 0) {
-    const absQty = Math.abs(numQty);
-
-    const { data: latestInTx } = await supabase
-      .from('transactions')
-      .select('unit_cost')
-      .eq('item_id', itemId)
-      .eq('type', 'in')
-      .gt('unit_cost', 0)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    const { data: latestBatch } = await supabase
-      .from('inventory_batches')
-      .select('unit_cost')
-      .eq('item_id', itemId)
-      .gt('unit_cost', 0)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    const fallbackUnitCost = latestBatch?.unit_cost || latestInTx?.unit_cost || unitCostVal || null;
-    const qtyMultiplier = isDualUnit ? measuredVal : absQty;
-    const fallbackTotalCost = fallbackUnitCost && qtyMultiplier ? fallbackUnitCost * qtyMultiplier : null;
-
-    const { data: fifoCost, error: fifoErr } = await supabase.rpc('process_fifo_out', {
-      p_item_id: itemId,
-      p_qty: absQty,
-      p_measured_qty: measuredVal,
-      p_dest_id: destId || null,
-      p_author_id: user.id
-    });
-
-    if (fifoErr) {
-      console.warn("FIFO RPC fallback:", fifoErr.message);
-      const { data: tx, error: txErr } = await supabase
-        .from('transactions')
-        .insert({
-          item_id: itemId,
-          qty: -absQty,
-          measured_qty: measuredVal,
-          unit_cost: fallbackUnitCost,
-          total_cost: fallbackTotalCost,
-          type: 'out',
-          destination_id: destId || null,
-          profile_id: user.id
-        })
-        .select()
-        .single();
-
-      if (txErr) return alert("Action failed: " + txErr.message);
-
-      await supabase
-        .from('items')
-        .update({ stock: currentStock - absQty })
-        .eq('id', itemId);
-    } else {
-      if (fallbackUnitCost) {
-        const { data: latestOutTx } = await supabase
-          .from('transactions')
-          .select('id, unit_cost, total_cost')
-          .eq('item_id', itemId)
-          .eq('type', 'out')
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (latestOutTx && (!latestOutTx.unit_cost || latestOutTx.unit_cost === 0)) {
-          await supabase
-            .from('transactions')
-            .update({
-              unit_cost: fallbackUnitCost,
-              total_cost: fallbackTotalCost
-            })
-            .eq('id', latestOutTx.id);
-        }
-      }
+    const rawInput = Number(qtyMap[itemId]); 
+    if (rawInput < 0) {
+      alert("Please enter a positive number. Use 'OUT' to subtract.");
+      return; 
     }
-  } else {
-    // --- IN Movement ---
-    // If no new price entered, inherit the latest unit_cost from previous IN records
-    if (!unitCostVal) {
-      const { data: previousInTx } = await supabase
+
+    const item = items.find(i => i.id === itemId);
+    const isDualUnit = Boolean(item?.is_measured);
+    const measuredVal = isDualUnit ? (Number(measuredQtyMap[itemId]) || null) : null;
+    let unitCostVal = Number(buyPriceMap[itemId]) || null;
+    const currentStock = item?.stock || 0;
+
+    // --- OUT Movement (FIFO execution) ---
+    if (numQty < 0) {
+      const absQty = Math.abs(numQty);
+
+      const { data: latestInTx } = await supabase
         .from('transactions')
         .select('unit_cost')
         .eq('item_id', itemId)
@@ -487,53 +409,133 @@ async function updateTransactionWeight(transaction: any, newValueStr: string) {
         .limit(1)
         .maybeSingle();
 
-      if (previousInTx?.unit_cost) {
-        unitCostVal = Number(previousInTx.unit_cost);
+      const { data: latestBatch } = await supabase
+        .from('inventory_batches')
+        .select('unit_cost')
+        .eq('item_id', itemId)
+        .gt('unit_cost', 0)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const fallbackUnitCost = latestBatch?.unit_cost || latestInTx?.unit_cost || unitCostVal || null;
+      const qtyMultiplier = isDualUnit ? measuredVal : absQty;
+      const fallbackTotalCost = fallbackUnitCost && qtyMultiplier ? fallbackUnitCost * qtyMultiplier : null;
+
+      const { data: fifoCost, error: fifoErr } = await supabase.rpc('process_fifo_out', {
+        p_item_id: itemId,
+        p_qty: absQty,
+        p_measured_qty: measuredVal,
+        p_dest_id: destId || null,
+        p_author_id: user.id
+      });
+
+      if (fifoErr) {
+        console.warn("FIFO RPC fallback:", fifoErr.message);
+        const { data: tx, error: txErr } = await supabase
+          .from('transactions')
+          .insert({
+            item_id: itemId,
+            qty: -absQty,
+            measured_qty: measuredVal,
+            unit_cost: fallbackUnitCost,
+            total_cost: fallbackTotalCost,
+            type: 'out',
+            destination_id: destId || null,
+            profile_id: user.id
+          })
+          .select()
+          .single();
+
+        if (txErr) return alert("Action failed: " + txErr.message);
+
+        await supabase
+          .from('items')
+          .update({ stock: currentStock - absQty })
+          .eq('id', itemId);
+      } else {
+        if (fallbackUnitCost) {
+          const { data: latestOutTx } = await supabase
+            .from('transactions')
+            .select('id, unit_cost, total_cost')
+            .eq('item_id', itemId)
+            .eq('type', 'out')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (latestOutTx && (!latestOutTx.unit_cost || latestOutTx.unit_cost === 0)) {
+            await supabase
+              .from('transactions')
+              .update({
+                unit_cost: fallbackUnitCost,
+                total_cost: fallbackTotalCost
+              })
+              .eq('id', latestOutTx.id);
+          }
+        }
       }
+    } else {
+      // --- IN Movement ---
+      // If no new price entered, inherit the latest unit_cost from previous IN records
+      if (!unitCostVal) {
+        const { data: previousInTx } = await supabase
+          .from('transactions')
+          .select('unit_cost')
+          .eq('item_id', itemId)
+          .eq('type', 'in')
+          .gt('unit_cost', 0)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (previousInTx?.unit_cost) {
+          unitCostVal = Number(previousInTx.unit_cost);
+        }
+      }
+
+      const qtyMultiplier = isDualUnit ? (measuredVal || numQty) : numQty;
+      const calcTotalCost = unitCostVal ? unitCostVal * qtyMultiplier : null;
+      
+      const { data: tx, error: txErr } = await supabase
+        .from('transactions')
+        .insert({
+          item_id: itemId,
+          qty: numQty,
+          measured_qty: measuredVal,
+          unit_cost: unitCostVal,
+          total_cost: calcTotalCost,
+          type: 'in',
+          destination_id: destId || null,
+          profile_id: user.id
+        })
+        .select()
+        .single();
+
+      if (txErr) return alert("Action failed: " + txErr.message);
+
+      await supabase.from('inventory_batches').insert({
+        item_id: itemId,
+        transaction_id: tx.id,
+        unit_cost: unitCostVal || 0,
+        remaining_qty: numQty,
+        remaining_measured_qty: measuredVal
+      });
+
+      const { error: stockErr } = await supabase
+        .from('items')
+        .update({ stock: currentStock + numQty })
+        .eq('id', itemId);
+
+      if (stockErr) return alert("Stock update failed: " + stockErr.message);
     }
 
-    const qtyMultiplier = isDualUnit ? (measuredVal || numQty) : numQty;
-    const calcTotalCost = unitCostVal ? unitCostVal * qtyMultiplier : null;
-    
-    const { data: tx, error: txErr } = await supabase
-      .from('transactions')
-      .insert({
-        item_id: itemId,
-        qty: numQty,
-        measured_qty: measuredVal,
-        unit_cost: unitCostVal,
-        total_cost: calcTotalCost,
-        type: 'in',
-        destination_id: destId || null,
-        profile_id: user.id
-      })
-      .select()
-      .single();
-
-    if (txErr) return alert("Action failed: " + txErr.message);
-
-    await supabase.from('inventory_batches').insert({
-      item_id: itemId,
-      transaction_id: tx.id,
-      unit_cost: unitCostVal || 0,
-      remaining_qty: numQty,
-      remaining_measured_qty: measuredVal
-    });
-
-    const { error: stockErr } = await supabase
-      .from('items')
-      .update({ stock: currentStock + numQty })
-      .eq('id', itemId);
-
-    if (stockErr) return alert("Stock update failed: " + stockErr.message);
+    setQtyMap(prev => ({ ...prev, [itemId]: '' }));
+    setMeasuredQtyMap(prev => ({ ...prev, [itemId]: '' }));
+    setBuyPriceMap(prev => ({ ...prev, [itemId]: '' }));
+    fetchItems();
+    fetchTransactions();
   }
-
-  setQtyMap(prev => ({ ...prev, [itemId]: '' }));
-  setMeasuredQtyMap(prev => ({ ...prev, [itemId]: '' }));
-  setBuyPriceMap(prev => ({ ...prev, [itemId]: '' }));
-  fetchItems();
-  fetchTransactions();
-}
 
   async function adjustStock(itemId: string, qty: any) {
     const numQty = parseInt(qty);
@@ -639,12 +641,56 @@ async function updateTransactionWeight(transaction: any, newValueStr: string) {
       .update(updatePayload)
       .eq('id', itemId);
 
-    if (!error) {
-      setEditingId(null);
-      fetchItems();
-    } else {
-      alert("Update failed: " + error.message);
+    if (error) return alert("Update failed: " + error.message);
+
+    // Super Admin: Direct Baseline Price Input update logic
+    const newPriceNum = editPrice ? Number(editPrice) : null;
+    if (profile?.role === 'super-admin' && newPriceNum !== null && !isNaN(newPriceNum) && newPriceNum >= 0) {
+      const { data: latestInTx } = await supabase
+        .from('transactions')
+        .select('id')
+        .eq('item_id', itemId)
+        .eq('type', 'in')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (latestInTx) {
+        await supabase
+          .from('transactions')
+          .update({ unit_cost: newPriceNum })
+          .eq('id', latestInTx.id);
+
+        await supabase
+          .from('inventory_batches')
+          .update({ unit_cost: newPriceNum })
+          .eq('transaction_id', latestInTx.id);
+      } else {
+        const { data: outs } = await supabase
+          .from('transactions')
+          .select('id, qty, measured_qty')
+          .eq('item_id', itemId)
+          .eq('type', 'out');
+
+        if (outs && outs.length > 0) {
+          for (const outTx of outs) {
+            const qtyMult = editIsMeasured ? (Number(outTx.measured_qty) || 0) : Math.abs(Number(outTx.qty));
+            await supabase
+              .from('transactions')
+              .update({
+                unit_cost: newPriceNum,
+                total_cost: newPriceNum * qtyMult
+              })
+              .eq('id', outTx.id);
+          }
+        }
+      }
     }
+
+    setEditingId(null);
+    setEditPrice('');
+    fetchItems();
+    fetchTransactions();
   }
 
   async function updateTransactionCost(transaction: any, newCostStr: string) {
@@ -1016,31 +1062,93 @@ async function updateTransactionWeight(transaction: any, newValueStr: string) {
         restSheet.addRow(rowData);
       });
 
-      // --- TAB 5: BRANCH COGS SUMMARY ---
+      // --- TAB 5: BRANCH COGS SUMMARY (REFINED PER RESTAURANT BREAKDOWN) ---
       const cogsSheet = workbook.addWorksheet('Branch COGS Summary');
 
+      const totalCogsCols = 4 + (allRestaurants.length * 3) + 3 + 3;
+
       cogsSheet.addRow([`BRANCH ISSUANCE COST SUMMARY (FIFO): ${currentDivName} (${month})`]);
-      cogsSheet.mergeCells(1, 1, 1, 6);
+      cogsSheet.mergeCells(1, 1, 1, totalCogsCols);
       cogsSheet.getRow(1).font = { bold: true, size: 14 };
 
-      const cogsHeader = ['No', 'Item Name', 'Division', 'Pcs Issued', 'Weight Issued', 'Total COGS (Rp)'];
-      cogsSheet.addRow(cogsHeader);
+      const cogsHeader2 = ['No', 'Item Name', 'Division', 'Unit'];
+      const cogsHeader3 = ['', '', '', ''];
+
+      allRestaurants.forEach((res: any) => {
+        cogsHeader2.push(`📍 ${res.name}`, '', '');
+        cogsHeader3.push('Pcs Issued', 'Weight Issued', 'COGS (Rp)');
+      });
+
+      cogsHeader2.push('Unspecified / None', '', '', 'Grand Total', '', '');
+      cogsHeader3.push('Pcs Issued', 'Weight Issued', 'COGS (Rp)', 'Total Pcs', 'Total Weight', 'Total COGS (Rp)');
+
+      cogsSheet.addRow(cogsHeader2);
+      cogsSheet.addRow(cogsHeader3);
+
       cogsSheet.getRow(2).font = { bold: true };
-      cogsSheet.getRow(2).fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: 'FFE0E0E0' }
-      };
+      cogsSheet.getRow(3).font = { bold: true };
+      cogsSheet.getRow(2).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } };
+      cogsSheet.getRow(3).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0F0F0' } };
+
+      // Merge top header row 2 cells for restaurants
+      let colIdx = 5;
+      allRestaurants.forEach(() => {
+        cogsSheet.mergeCells(2, colIdx, 2, colIdx + 2);
+        colIdx += 3;
+      });
+      cogsSheet.mergeCells(2, colIdx, 2, colIdx + 2); // Unspecified
+      colIdx += 3;
+      cogsSheet.mergeCells(2, colIdx, 2, colIdx + 2); // Grand Total
 
       items.forEach((item, index) => {
         const isDualUnit = Boolean(item.is_measured);
         const itemOuts = monthTransData.filter(t => t.item_id === item.id && t.type === 'out');
-        
-        const totalPcsOut = itemOuts.reduce((sum, t) => sum + Math.abs(t.qty), 0);
-        const totalKgOut = itemOuts.reduce((sum, t) => sum + (Number(t.measured_qty) || 0), 0);
         const fallbackUnitPrice = itemLatestUnitCostMap[item.id] || 0;
 
-        const totalCogsRp = itemOuts.reduce((sum, t) => {
+        const rowData: any[] = [
+          index + 1,
+          item.name,
+          item.divisions?.name || '-',
+          item.unit || '-'
+        ];
+
+        let grandTotalPcs = 0;
+        let grandTotalKg = 0;
+        let grandTotalCogs = 0;
+
+        allRestaurants.forEach((res: any) => {
+          const resOuts = itemOuts.filter(t => t.destination_id === res.id);
+          const pcsOut = resOuts.reduce((sum, t) => sum + Math.abs(t.qty), 0);
+          const kgOut = resOuts.reduce((sum, t) => sum + (Number(t.measured_qty) || 0), 0);
+          
+          const cogsRp = resOuts.reduce((sum, t) => {
+            let cost = Number(t.total_cost) || 0;
+            if (!cost || cost === 0) {
+              const unitPrice = Number(t.unit_cost) || fallbackUnitPrice;
+              const qtyMultiplier = isDualUnit 
+                ? (t.measured_qty ? Number(t.measured_qty) : 0)
+                : Math.abs(Number(t.qty));
+              cost = unitPrice * qtyMultiplier;
+            }
+            return sum + cost;
+          }, 0);
+
+          rowData.push(
+            pcsOut,
+            kgOut > 0 ? `${kgOut} ${item.measured_unit || 'kg'}` : '-',
+            cogsRp
+          );
+
+          grandTotalPcs += pcsOut;
+          grandTotalKg += kgOut;
+          grandTotalCogs += cogsRp;
+        });
+
+        // Unspecified / None
+        const unassignedOuts = itemOuts.filter(t => !t.destination_id);
+        const unassignedPcs = unassignedOuts.reduce((sum, t) => sum + Math.abs(t.qty), 0);
+        const unassignedKg = unassignedOuts.reduce((sum, t) => sum + (Number(t.measured_qty) || 0), 0);
+        const unassignedCogs = unassignedOuts.reduce((sum, t) => {
           let cost = Number(t.total_cost) || 0;
           if (!cost || cost === 0) {
             const unitPrice = Number(t.unit_cost) || fallbackUnitPrice;
@@ -1052,18 +1160,24 @@ async function updateTransactionWeight(transaction: any, newValueStr: string) {
           return sum + cost;
         }, 0);
 
-        cogsSheet.addRow([
-          index + 1,
-          item.name,
-          item.divisions?.name || '-',
-          totalPcsOut,
-          totalKgOut > 0 ? `${totalKgOut} ${item.measured_unit || 'kg'}` : '-',
-          totalCogsRp
-        ]);
+        grandTotalPcs += unassignedPcs;
+        grandTotalKg += unassignedKg;
+        grandTotalCogs += unassignedCogs;
+
+        rowData.push(
+          unassignedPcs,
+          unassignedKg > 0 ? `${unassignedKg} ${item.measured_unit || 'kg'}` : '-',
+          unassignedCogs,
+          grandTotalPcs,
+          grandTotalKg > 0 ? `${grandTotalKg} ${item.measured_unit || 'kg'}` : '-',
+          grandTotalCogs
+        );
+
+        cogsSheet.addRow(rowData);
       });
 
       cogsSheet.columns = [
-        { width: 8 }, { width: 25 }, { width: 18 }, { width: 12 }, { width: 18 }, { width: 20 }
+        { width: 8 }, { width: 25 }, { width: 18 }, { width: 10 }
       ];
 
       workbook.worksheets.forEach(sheet => {
@@ -1337,13 +1451,22 @@ async function updateTransactionWeight(transaction: any, newValueStr: string) {
                           onChange={(e) => setEditName(e.target.value)}
                           autoFocus
                         />
-                        <div className="flex gap-2 items-center">
+                        <div className="flex gap-2 items-center flex-wrap">
                           <input 
                             className="border p-1 rounded text-xs w-20 text-black outline-blue-500"
                             value={editUnit}
                             onChange={(e) => setEditUnit(e.target.value)}
                             placeholder="Unit"
                           />
+                          {profile?.role === 'super-admin' && (
+                            <input 
+                              type="number" 
+                              value={editPrice} 
+                              onChange={(e) => setEditPrice(e.target.value)}
+                              placeholder="Price (Rp)" 
+                              className="border text-xs p-1 rounded w-24 bg-gray-50 text-black outline-green-500 font-bold" 
+                            />
+                          )}
                           {profile?.role === 'super-admin' && (
                             <div className="flex items-center gap-1">
                               <label className="flex items-center gap-1 text-[10px] text-gray-600 font-bold cursor-pointer">
@@ -1379,12 +1502,23 @@ async function updateTransactionWeight(transaction: any, newValueStr: string) {
                         {profile?.role === 'super-admin' && (
                           <div className="flex gap-1">
                             <button 
-                              onClick={() => {
+                              onClick={async () => {
                                 setEditingId(item.id);
                                 setEditName(item.name);
                                 setEditUnit(item.unit);
                                 setEditIsMeasured(Boolean(item.is_measured));
                                 setEditMeasuredUnit(item.measured_unit || 'kg');
+
+                                const { data: priceTx } = await supabase
+                                  .from('transactions')
+                                  .select('unit_cost')
+                                  .eq('item_id', item.id)
+                                  .gt('unit_cost', 0)
+                                  .order('created_at', { ascending: false })
+                                  .limit(1)
+                                  .maybeSingle();
+
+                                setEditPrice(priceTx?.unit_cost ? String(priceTx.unit_cost) : '');
                               }}
                               className="text-blue-400 hover:text-blue-600 p-1 transition-colors"
                             >
