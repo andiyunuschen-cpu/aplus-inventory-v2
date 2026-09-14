@@ -56,6 +56,11 @@ export default function Home() {
   const [activityTimeSort, setActivityTimeSort] = useState<'newest' | 'oldest'>('newest')
   const [activityDestFilter, setActivityDestFilter] = useState<string>('all')
   const [activityMonth, setActivityMonth] = useState<string>('')
+  
+  const [editingWeightId, setEditingWeightId] = useState<string | null>(null)
+  const [editWeightValue, setEditWeightValue] = useState<string>('')
+  const [measuredStockMap, setMeasuredStockMap] = useState<{ [key: string]: number }>({})
+
 
   // 1. Initial Load / Boot Sequence
   useEffect(() => {
@@ -179,30 +184,99 @@ export default function Home() {
   }
 
   async function fetchItems() {
-    if (!profile || (profile.role !== 'super-admin' && allDivisions.length === 0)) {
-      return;
-    }
-    
-    let query = supabase
-      .from('items')
-      .select('*, divisions!inner(name, restaurant_id, restaurants(name))')
-      .order('name');
-    
-    if (selectedDivision !== 'all') {
-      query = query.eq('division_id', selectedDivision);
-    } else if (profile.role !== 'super-admin') {
-      const authorizedIds = allDivisions.map(d => d.id);
-      query = query.in('division_id', authorizedIds);
-    }
-
-    const { data, error } = await query;
-    if (error) {
-      console.error("Fetch Error:", error.message);
-    } else {
-      setItems(data || []);
-    }
+  if (!profile || (profile.role !== 'super-admin' && allDivisions.length === 0)) {
+    return;
+  }
+  
+  let query = supabase
+    .from('items')
+    .select('*, divisions!inner(name, restaurant_id, restaurants(name))')
+    .order('name');
+  
+  if (selectedDivision !== 'all') {
+    query = query.eq('division_id', selectedDivision);
+  } else if (profile.role !== 'super-admin') {
+    const authorizedIds = allDivisions.map(d => d.id);
+    query = query.in('division_id', authorizedIds);
   }
 
+  const { data, error } = await query;
+  if (error) {
+    console.error("Fetch Error:", error.message);
+  } else {
+    setItems(data || []);
+
+    // Fetch measured totals (kg) per item
+    const { data: txMeasured } = await supabase
+      .from('transactions')
+      .select('item_id, type, measured_qty')
+      .not('measured_qty', 'is', null);
+
+    const weightMap: { [key: string]: number } = {};
+    (txMeasured || []).forEach((t: any) => {
+      const mQty = Number(t.measured_qty) || 0;
+      if (!weightMap[t.item_id]) weightMap[t.item_id] = 0;
+      if (t.type === 'in') {
+        weightMap[t.item_id] += mQty;
+      } else if (t.type === 'out') {
+        weightMap[t.item_id] -= mQty;
+      }
+    });
+    setMeasuredStockMap(weightMap);
+  }
+}
+async function updateTransactionWeight(transaction: any, newValueStr: string) {
+  if (profile?.role !== 'super-admin') {
+    alert("Access Denied: Only administrators can edit transaction weights.");
+    return;
+  }
+
+  const newWeight = newValueStr === '' ? null : Number(newValueStr);
+  if (newWeight !== null && (isNaN(newWeight) || newWeight < 0)) return;
+
+  const { data: itemData } = await supabase
+    .from('items')
+    .select('is_measured')
+    .eq('id', transaction.item_id)
+    .single();
+
+  const isDualUnit = Boolean(itemData?.is_measured);
+  const unitCost = Number(transaction.unit_cost) || 0;
+  
+  let newTotalCost: number | null = transaction.total_cost;
+  if (isDualUnit) {
+    newTotalCost = (newWeight !== null && unitCost > 0) ? unitCost * newWeight : null;
+  } else {
+    newTotalCost = unitCost > 0 ? unitCost * Math.abs(Number(transaction.qty)) : null;
+  }
+
+  try {
+    const { error: txErr } = await supabase
+      .from('transactions')
+      .update({ 
+        measured_qty: newWeight,
+        total_cost: newTotalCost 
+      })
+      .eq('id', transaction.id);
+
+    if (txErr) throw txErr;
+
+    if (transaction.type === 'in') {
+      await supabase
+        .from('inventory_batches')
+        .update({ remaining_measured_qty: newWeight })
+        .eq('transaction_id', transaction.id);
+    }
+
+    fetchTransactions(search);
+    fetchItems();
+    setEditingWeightId(null);
+    alert("Weight (kg) updated and cost recalculated successfully!");
+  } catch (error: any) {
+    console.error("Error updating weight:", error.message);
+    alert("Failed to update weight: " + error.message);
+  }
+}
   async function fetchTransactions(searchQuery = search, isLoadMore = false, monthFilter = activityMonth) {
     if (!user || !profile) return;
 
@@ -1336,9 +1410,17 @@ export default function Home() {
                     )}
                   </div>
 
+                  {/* REMAINING STOCK DISPLAY (PCS & WEIGHT) */}
                   {editingId !== item.id && (
-                    <div className="text-2xl font-black text-blue-600 ml-2">
-                      {item.stock} <span className="text-xs font-normal text-gray-400">{item.unit}</span>
+                    <div className="flex flex-col items-end ml-2">
+                      <div className="text-2xl font-black text-blue-600">
+                        {item.stock} <span className="text-xs font-normal text-gray-400">{item.unit}</span>
+                      </div>
+                      {showDualUnit && (
+                        <div className="text-xs font-bold text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded border border-purple-100 mt-0.5">
+                          ⚖️ {(measuredStockMap[item.id] || 0).toFixed(2)} {item.measured_unit || 'kg'}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1611,6 +1693,49 @@ export default function Home() {
                         >
                           📍 TO: {destName || 'Set Destination'}
                         </button>
+                      )}
+
+                      {/* EDITABLE WEIGHT BADGE FOR DUAL-UNIT ITEMS */}
+                      {itemRef?.is_measured && profile?.role === 'super-admin' && (
+                        editingWeightId === t.id ? (
+                          <div className="flex items-center gap-1">
+                            <input 
+                              type="number" 
+                              step="0.01"
+                              placeholder={`Weight (${itemRef?.measured_unit || 'kg'})`}
+                              className="w-20 text-[10px] font-black border border-purple-300 rounded p-1 outline-purple-500 text-center text-black bg-white"
+                              value={editWeightValue}
+                              onChange={(e) => setEditWeightValue(e.target.value)}
+                            />
+                            <button 
+                              onClick={() => updateTransactionWeight(t, editWeightValue)}
+                              className="text-[9px] bg-purple-600 hover:bg-purple-700 text-white px-2 py-1 rounded font-bold transition-colors"
+                            >
+                              Save
+                            </button>
+                            <button 
+                              onClick={() => setEditingWeightId(null)} 
+                              className="text-[9px] text-gray-400 font-bold hover:text-red-500 ml-1"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ) : (
+                          <button 
+                            onClick={() => {
+                              setEditingWeightId(t.id);
+                              setEditWeightValue(t.measured_qty ? t.measured_qty.toString() : '');
+                            }}
+                            className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase border transition-all ${
+                              t.measured_qty 
+                              ? 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100' 
+                              : 'bg-yellow-50 text-yellow-700 border-yellow-200 hover:bg-yellow-100 italic'
+                            }`}
+                            title="Click to edit measured weight (kg)"
+                          >
+                            ⚖️ {t.measured_qty ? `${t.measured_qty} ${itemRef?.measured_unit || 'kg'}` : '+ Add Weight'}
+                          </button>
+                        )
                       )}
 
                       {/* EDITABLE PRICE BADGE FOR ADMIN */}
