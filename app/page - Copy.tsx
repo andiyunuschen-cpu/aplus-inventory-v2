@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useRef } from 'react'
-import { supabase } from '../../lib/supabaseClient'
+import { supabase } from '../lib/supabaseClient'
 import ExcelJS from 'exceljs'
 import { saveAs } from 'file-saver'
 
@@ -22,12 +22,8 @@ export default function Home() {
   // --- INVENTORY STATE ---
   const [items, setItems] = useState<any[]>([])
   const [qtyMap, setQtyMap] = useState<{ [key: string]: any }>({})
-  const [measuredQtyMap, setMeasuredQtyMap] = useState<{ [key: string]: any }>({})
-  const [buyPriceMap, setBuyPriceMap] = useState<{ [key: string]: any }>({})
   const [newItem, setNewItem] = useState('')
   const [unit, setUnit] = useState('')
-  const [isMeasuredNewItem, setIsMeasuredNewItem] = useState(false)
-  const [measuredUnitNewItem, setMeasuredUnitNewItem] = useState('kg')
   const [transactions, setTransactions] = useState<any[]>([])
   
   // --- FILTER & SORT STATE ---
@@ -39,8 +35,6 @@ export default function Home() {
   const [editingDestId, setEditingDestId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
   const [editUnit, setEditUnit] = useState('')
-  const [editIsMeasured, setEditIsMeasured] = useState(false)
-  const [editMeasuredUnit, setEditMeasuredUnit] = useState('kg')
   const [showEmptyOnly, setShowEmptyOnly] = useState(false)
   const [destMap, setDestMap] = useState<{ [key: string]: string }>({})
   const [page, setPage] = useState(0)
@@ -49,8 +43,6 @@ export default function Home() {
   const [editDateValue, setEditDateValue] = useState<string>('')
   const [editingQtyId, setEditingQtyId] = useState<string | null>(null)
   const [editQtyValue, setEditQtyValue] = useState<string>('')
-  const [editingCostId, setEditingCostId] = useState<string | null>(null)
-  const [editCostValue, setEditCostValue] = useState<string>('')
 
   // --- INDEPENDENT ACTIVITY FEED CONTROLS ---
   const [activityTimeSort, setActivityTimeSort] = useState<'newest' | 'oldest'>('newest')
@@ -213,8 +205,8 @@ export default function Home() {
     let query = supabase
       .from('transactions')
       .select(`
-        id, qty, measured_qty, unit_cost, total_cost, prev_qty, type, created_at, item_id, destination_id,
-        items!inner ( name, unit, measured_unit, is_measured, division_id ), 
+        id, qty, prev_qty, type, created_at, item_id, destination_id,
+        items!inner ( name, unit, division_id ), 
         author:profiles!profile_id ( username ),
         destination:restaurants!destination_id ( name )
       `)
@@ -289,177 +281,39 @@ export default function Home() {
       name: newItem,
       stock: 0,
       unit: unit,
-      division_id: targetDivision,
-      is_measured: profile?.role === 'super-admin' ? isMeasuredNewItem : false,
-      measured_unit: isMeasuredNewItem ? measuredUnitNewItem : null
+      division_id: targetDivision
     });
 
     if (!error) {
-      setNewItem(''); 
-      setUnit(''); 
-      setIsMeasuredNewItem(false);
-      fetchItems();
+      setNewItem(''); setUnit(''); fetchItems();
     } else {
       alert(error.message);
     }
   }
 
   async function updateStock(itemId: string, numQty: number, destId?: string) {
-  if (!numQty || numQty === 0) return;
+    if (!numQty || numQty === 0) return;
 
-  const rawInput = Number(qtyMap[itemId]); 
-  if (rawInput < 0) {
-    alert("Please enter a positive number. Use 'OUT' to subtract.");
-    return; 
-  }
+    const rawInput = Number(qtyMap[itemId]); 
+    if (rawInput < 0) {
+      alert("Please enter a positive number. Use 'OUT' to subtract.");
+      return; 
+    }
 
-  const item = items.find(i => i.id === itemId);
-  const isDualUnit = Boolean(item?.is_measured);
-  const measuredVal = isDualUnit ? (Number(measuredQtyMap[itemId]) || null) : null;
-  let unitCostVal = Number(buyPriceMap[itemId]) || null;
-  const currentStock = item?.stock || 0;
-
-  // --- OUT Movement (FIFO execution) ---
-  if (numQty < 0) {
-    const absQty = Math.abs(numQty);
-
-    const { data: latestInTx } = await supabase
-      .from('transactions')
-      .select('unit_cost')
-      .eq('item_id', itemId)
-      .eq('type', 'in')
-      .gt('unit_cost', 0)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    const { data: latestBatch } = await supabase
-      .from('inventory_batches')
-      .select('unit_cost')
-      .eq('item_id', itemId)
-      .gt('unit_cost', 0)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    const fallbackUnitCost = latestBatch?.unit_cost || latestInTx?.unit_cost || unitCostVal || null;
-    const qtyMultiplier = isDualUnit ? measuredVal : absQty;
-    const fallbackTotalCost = fallbackUnitCost && qtyMultiplier ? fallbackUnitCost * qtyMultiplier : null;
-
-    const { data: fifoCost, error: fifoErr } = await supabase.rpc('process_fifo_out', {
-      p_item_id: itemId,
-      p_qty: absQty,
-      p_measured_qty: measuredVal,
-      p_dest_id: destId || null,
-      p_author_id: user.id
+    const { error } = await supabase.rpc('update_stock', { 
+      item_id: itemId, 
+      qty: numQty,
+      dest_id: destId || null 
     });
 
-    if (fifoErr) {
-      console.warn("FIFO RPC fallback:", fifoErr.message);
-      const { data: tx, error: txErr } = await supabase
-        .from('transactions')
-        .insert({
-          item_id: itemId,
-          qty: -absQty,
-          measured_qty: measuredVal,
-          unit_cost: fallbackUnitCost,
-          total_cost: fallbackTotalCost,
-          type: 'out',
-          destination_id: destId || null,
-          profile_id: user.id
-        })
-        .select()
-        .single();
-
-      if (txErr) return alert("Action failed: " + txErr.message);
-
-      await supabase
-        .from('items')
-        .update({ stock: currentStock - absQty })
-        .eq('id', itemId);
+    if (!error) {
+      setQtyMap(prev => ({ ...prev, [itemId]: '' }));
+      fetchItems();
+      fetchTransactions();
     } else {
-      if (fallbackUnitCost) {
-        const { data: latestOutTx } = await supabase
-          .from('transactions')
-          .select('id, unit_cost, total_cost')
-          .eq('item_id', itemId)
-          .eq('type', 'out')
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (latestOutTx && (!latestOutTx.unit_cost || latestOutTx.unit_cost === 0)) {
-          await supabase
-            .from('transactions')
-            .update({
-              unit_cost: fallbackUnitCost,
-              total_cost: fallbackTotalCost
-            })
-            .eq('id', latestOutTx.id);
-        }
-      }
+      alert("Action failed: " + error.message);
     }
-  } else {
-    // --- IN Movement ---
-    // If no new price entered, inherit the latest unit_cost from previous IN records
-    if (!unitCostVal) {
-      const { data: previousInTx } = await supabase
-        .from('transactions')
-        .select('unit_cost')
-        .eq('item_id', itemId)
-        .eq('type', 'in')
-        .gt('unit_cost', 0)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (previousInTx?.unit_cost) {
-        unitCostVal = Number(previousInTx.unit_cost);
-      }
-    }
-
-    const qtyMultiplier = isDualUnit ? (measuredVal || numQty) : numQty;
-    const calcTotalCost = unitCostVal ? unitCostVal * qtyMultiplier : null;
-    
-    const { data: tx, error: txErr } = await supabase
-      .from('transactions')
-      .insert({
-        item_id: itemId,
-        qty: numQty,
-        measured_qty: measuredVal,
-        unit_cost: unitCostVal,
-        total_cost: calcTotalCost,
-        type: 'in',
-        destination_id: destId || null,
-        profile_id: user.id
-      })
-      .select()
-      .single();
-
-    if (txErr) return alert("Action failed: " + txErr.message);
-
-    await supabase.from('inventory_batches').insert({
-      item_id: itemId,
-      transaction_id: tx.id,
-      unit_cost: unitCostVal || 0,
-      remaining_qty: numQty,
-      remaining_measured_qty: measuredVal
-    });
-
-    const { error: stockErr } = await supabase
-      .from('items')
-      .update({ stock: currentStock + numQty })
-      .eq('id', itemId);
-
-    if (stockErr) return alert("Stock update failed: " + stockErr.message);
   }
-
-  setQtyMap(prev => ({ ...prev, [itemId]: '' }));
-  setMeasuredQtyMap(prev => ({ ...prev, [itemId]: '' }));
-  setBuyPriceMap(prev => ({ ...prev, [itemId]: '' }));
-  fetchItems();
-  fetchTransactions();
-}
 
   async function adjustStock(itemId: string, qty: any) {
     const numQty = parseInt(qty);
@@ -505,64 +359,12 @@ export default function Home() {
     setLoading(false);
   }
 
-  async function deleteTransaction(transaction: any) {
-    if (profile?.role !== 'super-admin') {
-      alert("Access Denied: Only administrators can delete transactions.");
-      return;
-    }
-
-    const itemName = transaction.items?.name || 'this item';
-    if (!confirm(`Delete this ${transaction.type.toUpperCase()} transaction for "${itemName}"? This will also revert the stock.`)) return;
-
-    setLoading(true);
-    try {
-      const { data: itemData } = await supabase
-        .from('items')
-        .select('stock')
-        .eq('id', transaction.item_id)
-        .single();
-
-      if (itemData) {
-        let newStock = itemData.stock;
-        if (transaction.type === 'in') {
-          newStock -= Math.abs(transaction.qty);
-        } else if (transaction.type === 'out') {
-          newStock += Math.abs(transaction.qty);
-        }
-        await supabase.from('items').update({ stock: newStock }).eq('id', transaction.item_id);
-      }
-
-      if (transaction.type === 'in') {
-        await supabase.from('inventory_batches').delete().eq('transaction_id', transaction.id);
-      }
-
-      const { error } = await supabase.from('transactions').delete().eq('id', transaction.id);
-      if (error) throw error;
-
-      await Promise.all([fetchItems(), fetchTransactions(search)]);
-    } catch (err: any) {
-      alert("Failed to delete transaction: " + err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
   async function updateItem(itemId: string) {
     if (!editName.trim() || !editUnit.trim()) return alert("Fields cannot be empty");
 
-    const updatePayload: any = { 
-      name: editName, 
-      unit: editUnit 
-    };
-
-    if (profile?.role === 'super-admin') {
-      updatePayload.is_measured = editIsMeasured;
-      updatePayload.measured_unit = editIsMeasured ? editMeasuredUnit : null;
-    }
-
     const { error } = await supabase
       .from('items')
-      .update(updatePayload)
+      .update({ name: editName, unit: editUnit })
       .eq('id', itemId);
 
     if (!error) {
@@ -570,102 +372,6 @@ export default function Home() {
       fetchItems();
     } else {
       alert("Update failed: " + error.message);
-    }
-  }
-
-  async function updateTransactionCost(transaction: any, newCostStr: string) {
-    if (profile?.role !== 'super-admin') {
-      alert("Access Denied: Only administrators can edit transaction prices.");
-      return;
-    }
-
-    const newUnitCost = Number(newCostStr);
-    if (isNaN(newUnitCost) || newUnitCost < 0) return;
-
-    const { data: itemData } = await supabase
-      .from('items')
-      .select('is_measured')
-      .eq('id', transaction.item_id)
-      .single();
-
-    const isDualUnit = Boolean(itemData?.is_measured);
-
-    let qtyMultiplier: number | null = null;
-    if (isDualUnit) {
-      qtyMultiplier = transaction.measured_qty ? Number(transaction.measured_qty) : null;
-    } else {
-      qtyMultiplier = Math.abs(Number(transaction.qty));
-    }
-
-    const newTotalCost = qtyMultiplier !== null ? newUnitCost * qtyMultiplier : null;
-
-    try {
-      const { error: txErr } = await supabase
-        .from('transactions')
-        .update({ 
-          unit_cost: newUnitCost, 
-          total_cost: newTotalCost 
-        })
-        .eq('id', transaction.id);
-
-      if (txErr) throw txErr;
-
-      if (transaction.type === 'in') {
-        const { data: existingBatch } = await supabase
-          .from('inventory_batches')
-          .select('id')
-          .eq('transaction_id', transaction.id)
-          .maybeSingle();
-
-        if (existingBatch) {
-          await supabase
-            .from('inventory_batches')
-            .update({ unit_cost: newUnitCost })
-            .eq('transaction_id', transaction.id);
-        } else {
-          await supabase.from('inventory_batches').insert({
-            item_id: transaction.item_id,
-            transaction_id: transaction.id,
-            unit_cost: newUnitCost,
-            remaining_qty: transaction.qty,
-            remaining_measured_qty: transaction.measured_qty || null
-          });
-        }
-      }
-
-      const { data: uncostedOuts } = await supabase
-        .from('transactions')
-        .select('id, qty, measured_qty')
-        .eq('item_id', transaction.item_id)
-        .eq('type', 'out');
-
-      if (uncostedOuts && uncostedOuts.length > 0) {
-        for (const outTx of uncostedOuts) {
-          let outTotalCost: number | null = null;
-          if (isDualUnit) {
-            if (outTx.measured_qty && Number(outTx.measured_qty) > 0) {
-              outTotalCost = newUnitCost * Number(outTx.measured_qty);
-            }
-          } else {
-            outTotalCost = newUnitCost * Math.abs(Number(outTx.qty));
-          }
-
-          await supabase
-            .from('transactions')
-            .update({
-              unit_cost: newUnitCost,
-              total_cost: outTotalCost
-            })
-            .eq('id', outTx.id);
-        }
-      }
-
-      fetchTransactions(search);
-      setEditingCostId(null);
-      alert("Transaction price updated successfully!");
-    } catch (error: any) {
-      console.error("Error updating price:", error.message);
-      alert("Failed to update price: " + error.message);
     }
   }
 
@@ -689,15 +395,12 @@ export default function Home() {
         .from('transactions')
         .select(`
           qty, 
-          measured_qty,
-          unit_cost,
-          total_cost,
           prev_qty, 
           type, 
           created_at, 
           item_id, 
           destination_id,
-          items!inner(name, unit, measured_unit, is_measured, division_id, divisions(name, restaurants(name))),
+          items!inner(name, unit, division_id, divisions(name, restaurants(name))),
           author:profiles!profile_id ( username ),
           destination:restaurants!destination_id ( name ) 
         `)
@@ -717,13 +420,6 @@ export default function Home() {
       const currentDivName = currentDiv 
         ? `${currentDiv.restaurants?.name || 'Branch'} - ${currentDiv.name}` 
         : 'All Authorized Branches';
-
-      const itemLatestUnitCostMap: { [itemId: string]: number } = {};
-      (allTransData || []).forEach(t => {
-        if (t.type === 'in' && t.unit_cost && Number(t.unit_cost) > 0) {
-          itemLatestUnitCostMap[t.item_id] = Number(t.unit_cost);
-        }
-      });
 
       // --- TAB 1: MONTHLY INVENTORY ---
       const worksheet = workbook.addWorksheet('Monthly Inventory');
@@ -841,10 +537,10 @@ export default function Home() {
       const moveSheet = workbook.addWorksheet('Daily Movement');
 
       moveSheet.addRow([`DETAILED MOVEMENT LOG: ${currentDivName} (${month})`]);
-      moveSheet.mergeCells(1, 1, 1, 8); 
+      moveSheet.mergeCells(1, 1, 1, 6); 
       moveSheet.getRow(1).font = { bold: true, size: 14 };
 
-      const moveHeader = ['Date and time', 'Item Name', 'Movement', 'Pcs Qty', 'Measured Weight', 'Unit Cost (Rp)', 'Total Cost (Rp)', 'Destination'];
+      const moveHeader = ['Date and time', 'Item Name', 'Movement', 'Qty', 'Unit', 'Destination'];
       moveSheet.addRow(moveHeader);
       moveSheet.getRow(2).font = { bold: true };
       moveSheet.getRow(2).fill = {
@@ -857,16 +553,7 @@ export default function Home() {
 
       movements.forEach((m: any) => {
         const itemRef = Array.isArray(m.items) ? m.items[0] : m.items;
-        const isDualUnit = Boolean(itemRef?.is_measured);
-        const fallbackPrice = itemLatestUnitCostMap[m.item_id] || 0;
-        const effectiveUnitCost = m.unit_cost ? Number(m.unit_cost) : fallbackPrice;
         
-        const qtyMult = isDualUnit 
-          ? (m.measured_qty ? Number(m.measured_qty) : 0)
-          : Math.abs(Number(m.qty));
-          
-        const effectiveTotalCost = m.total_cost ? Number(m.total_cost) : (effectiveUnitCost * qtyMult);
-
         moveSheet.addRow([
           new Date(m.created_at).toLocaleString('en-GB', { 
             day: '2-digit', month: '2-digit', year: 'numeric', 
@@ -876,16 +563,18 @@ export default function Home() {
           itemRef?.name || 'Unknown',
           m.type === 'in' ? 'In' : 'Out',
           Math.abs(m.qty),
-          m.measured_qty ? `${m.measured_qty} ${itemRef?.measured_unit || 'kg'}` : '-',
-          effectiveUnitCost > 0 ? effectiveUnitCost : '-',
-          effectiveTotalCost > 0 ? effectiveTotalCost : '-',
+          itemRef?.unit || '-',
           m.destination?.name || '-'
         ]);
       });
 
       moveSheet.columns = [
-        { width: 25 }, { width: 20 }, { width: 12 }, { width: 10 },
-        { width: 18 }, { width: 15 }, { width: 15 }, { width: 25 }
+        { width: 25 },
+        { width: 20 },
+        { width: 12 },
+        { width: 8 },
+        { width: 10 },
+        { width: 25 }
       ];
 
       // --- TAB 4: RESTAURANT OUT BREAKDOWN ---
@@ -941,56 +630,6 @@ export default function Home() {
 
         restSheet.addRow(rowData);
       });
-
-      // --- TAB 5: BRANCH COGS SUMMARY ---
-      const cogsSheet = workbook.addWorksheet('Branch COGS Summary');
-
-      cogsSheet.addRow([`BRANCH ISSUANCE COST SUMMARY (FIFO): ${currentDivName} (${month})`]);
-      cogsSheet.mergeCells(1, 1, 1, 6);
-      cogsSheet.getRow(1).font = { bold: true, size: 14 };
-
-      const cogsHeader = ['No', 'Item Name', 'Division', 'Pcs Issued', 'Weight Issued', 'Total COGS (Rp)'];
-      cogsSheet.addRow(cogsHeader);
-      cogsSheet.getRow(2).font = { bold: true };
-      cogsSheet.getRow(2).fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: 'FFE0E0E0' }
-      };
-
-      items.forEach((item, index) => {
-        const isDualUnit = Boolean(item.is_measured);
-        const itemOuts = monthTransData.filter(t => t.item_id === item.id && t.type === 'out');
-        
-        const totalPcsOut = itemOuts.reduce((sum, t) => sum + Math.abs(t.qty), 0);
-        const totalKgOut = itemOuts.reduce((sum, t) => sum + (Number(t.measured_qty) || 0), 0);
-        const fallbackUnitPrice = itemLatestUnitCostMap[item.id] || 0;
-
-        const totalCogsRp = itemOuts.reduce((sum, t) => {
-          let cost = Number(t.total_cost) || 0;
-          if (!cost || cost === 0) {
-            const unitPrice = Number(t.unit_cost) || fallbackUnitPrice;
-            const qtyMultiplier = isDualUnit 
-              ? (t.measured_qty ? Number(t.measured_qty) : 0)
-              : Math.abs(Number(t.qty));
-            cost = unitPrice * qtyMultiplier;
-          }
-          return sum + cost;
-        }, 0);
-
-        cogsSheet.addRow([
-          index + 1,
-          item.name,
-          item.divisions?.name || '-',
-          totalPcsOut,
-          totalKgOut > 0 ? `${totalKgOut} ${item.measured_unit || 'kg'}` : '-',
-          totalCogsRp
-        ]);
-      });
-
-      cogsSheet.columns = [
-        { width: 8 }, { width: 25 }, { width: 18 }, { width: 12 }, { width: 18 }, { width: 20 }
-      ];
 
       workbook.worksheets.forEach(sheet => {
         sheet.eachRow({ includeEmpty: false }, (row) => {
@@ -1152,39 +791,13 @@ export default function Home() {
           
           <div className="lg:col-span-4">
             <label className="block text-[10px] font-black text-gray-400 mb-2 uppercase tracking-widest">Quick Add Item</label>
-            <div className="flex flex-col gap-2">
-              <div className="flex gap-2">
-                <input value={newItem} onChange={(e) => setNewItem(e.target.value)} placeholder={profile?.role === 'managerharsa' ? "Locked" : "Name"} disabled={profile?.role === 'managerharsa'} 
-                  className="border p-2.5 rounded-lg flex-1 text-sm bg-gray-50 outline-blue-500 text-black" />
-                <input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="Unit" 
-                  disabled={profile?.role === 'managerharsa'} 
-                  className="border p-2.5 rounded-lg w-20 text-sm bg-gray-50 outline-blue-500 text-black" />
-                <button onClick={addNewItem} className="bg-blue-600 text-white px-4 py-2.5 rounded-lg font-bold text-sm">Add</button>
-              </div>
-
-              {/* Catch Weight Admin Setting */}
-              {profile?.role === 'super-admin' && (
-                <div className="flex items-center gap-2 mt-1">
-                  <label className="flex items-center gap-1.5 text-xs text-gray-600 font-bold cursor-pointer">
-                    <input 
-                      type="checkbox" 
-                      checked={isMeasuredNewItem} 
-                      onChange={(e) => setIsMeasuredNewItem(e.target.checked)} 
-                      className="rounded text-blue-600"
-                    />
-                    Catch Weight (Dual Unit)
-                  </label>
-                  {isMeasuredNewItem && (
-                    <input 
-                      type="text" 
-                      value={measuredUnitNewItem} 
-                      onChange={(e) => setMeasuredUnitNewItem(e.target.value)}
-                      placeholder="e.g. kg" 
-                      className="border text-xs p-1 rounded w-16 bg-gray-50 text-black outline-blue-500 font-bold" 
-                    />
-                  )}
-                </div>
-              )}
+            <div className="flex gap-2">
+              <input value={newItem} onChange={(e) => setNewItem(e.target.value)} placeholder={profile?.role === 'managerharsa' ? "Locked" : "Name"} disabled={profile?.role === 'managerharsa'} 
+                className="border p-2.5 rounded-lg flex-1 text-sm bg-gray-50 outline-blue-500 text-black" />
+              <input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="Unit" 
+                disabled={profile?.role === 'managerharsa'} 
+                className="border p-2.5 rounded-lg w-20 text-sm bg-gray-50 outline-blue-500 text-black" />
+              <button onClick={addNewItem} className="bg-blue-600 text-white px-4 py-2.5 rounded-lg font-bold text-sm">Add</button>
             </div>
           </div>
 
@@ -1248,188 +861,122 @@ export default function Home() {
             const matchesStock = showEmptyOnly ? i.stock <= 2 : true;
             return matchesSearch && matchesStock;
           })
-          .map((item: any) => {
-            const showDualUnit = Boolean(item.is_measured);
-
-            return (
-              <div key={item.id} className="bg-white border p-4 rounded-xl flex flex-col gap-3 shadow-sm hover:shadow-md transition-all">
-                <div className="flex justify-between items-start">
-                  <div className="w-full">
-                    {editingId === item.id ? (
-                      <div className="flex flex-col gap-2 mb-2">
-                        <input 
-                          className="border p-1 rounded text-sm font-bold w-full text-black outline-blue-500"
-                          value={editName}
-                          onChange={(e) => setEditName(e.target.value)}
-                          autoFocus
-                        />
-                        <div className="flex gap-2 items-center">
-                          <input 
-                            className="border p-1 rounded text-xs w-20 text-black outline-blue-500"
-                            value={editUnit}
-                            onChange={(e) => setEditUnit(e.target.value)}
-                            placeholder="Unit"
-                          />
-                          {profile?.role === 'super-admin' && (
-                            <div className="flex items-center gap-1">
-                              <label className="flex items-center gap-1 text-[10px] text-gray-600 font-bold cursor-pointer">
-                                <input 
-                                  type="checkbox" 
-                                  checked={editIsMeasured} 
-                                  onChange={(e) => setEditIsMeasured(e.target.checked)} 
-                                  className="rounded text-purple-600"
-                                />
-                                Dual Unit
-                              </label>
-                              {editIsMeasured && (
-                                <input 
-                                  type="text" 
-                                  value={editMeasuredUnit} 
-                                  onChange={(e) => setEditMeasuredUnit(e.target.value)}
-                                  placeholder="kg" 
-                                  className="border text-xs p-1 rounded w-14 bg-gray-50 text-black outline-purple-500 font-bold" 
-                                />
-                              )}
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex gap-2">
-                          <button onClick={() => updateItem(item.id)} className="text-[10px] bg-blue-600 text-white px-2 py-1 rounded font-bold">Save</button>
-                          <button onClick={() => setEditingId(null)} className="text-[10px] bg-gray-400 text-white px-2 py-1 rounded font-bold">Cancel</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <div className="font-bold text-gray-800 text-lg leading-tight uppercase">{item.name}</div>
-                        
-                        {profile?.role === 'super-admin' && (
-                          <div className="flex gap-1">
-                            <button 
-                              onClick={() => {
-                                setEditingId(item.id);
-                                setEditName(item.name);
-                                setEditUnit(item.unit);
-                                setEditIsMeasured(Boolean(item.is_measured));
-                                setEditMeasuredUnit(item.measured_unit || 'kg');
-                              }}
-                              className="text-blue-400 hover:text-blue-600 p-1 transition-colors"
-                            >
-                              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                              </svg>
-                            </button>
-                            <button onClick={() => deleteItem(item.id, item.name)} className="text-red-300 hover:text-red-600 p-1 transition-colors">
-                              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                              </svg>
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    
-                    {editingId !== item.id && (
-                      <div className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">
-                          {item.divisions?.restaurants?.name} — {item.divisions?.name}
-                          {showDualUnit && <span className="ml-2 text-purple-600 font-black">⚖️ {item.measured_unit || 'kg'}</span>}
-                      </div>
-                    )}
-                  </div>
-
-                  {editingId !== item.id && (
-                    <div className="text-2xl font-black text-blue-600 ml-2">
-                      {item.stock} <span className="text-xs font-normal text-gray-400">{item.unit}</span>
-                    </div>
-                  )}
-                </div>
-                
-                <div className="flex flex-col gap-2 bg-gray-50 p-2 rounded-lg mt-auto">
-                  <div className="flex flex-col px-1">
-                    <label className="text-[9px] font-black text-gray-400 uppercase tracking-tighter">Destination</label>
-                    <select 
-                      value={destMap[item.id] || ''} 
-                      onChange={(e) => setDestMap({...destMap, [item.id]: e.target.value})}
-                      className="text-[10px] p-1 bg-white border rounded border-gray-200 outline-blue-500 font-bold text-gray-700"
-                    >
-                      <option value="">-- Select Destination --</option>
-                      {allRestaurants.map((res: any) => (
-                        <option key={res.id} value={res.id}>
-                          {res.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Conditional Dual Unit / Purchasing Price Inputs */}
-                  <div className="flex flex-col gap-1 px-1">
-                    {showDualUnit && (
-                      <div className="flex flex-col">
-                        <label className="text-[9px] font-black text-purple-500 uppercase tracking-tighter">
-                          Weight / Volume ({item.measured_unit || 'kg'})
-                        </label>
-                        <input 
-                          type="number" 
-                          step="0.01"
-                          placeholder={`e.g. 12.5 ${item.measured_unit || 'kg'}`} 
-                          value={measuredQtyMap[item.id] || ''} 
-                          onChange={(e) => setMeasuredQtyMap({...measuredQtyMap, [item.id]: e.target.value})} 
-                          className="text-xs p-1 bg-white border border-purple-200 rounded font-bold text-black outline-purple-500" 
-                        />
-                      </div>
-                    )}
-
-                    {profile?.role === 'super-admin' && (
-                      <div className="flex flex-col">
-                        <label className="text-[9px] font-black text-green-600 uppercase tracking-tighter">
-                          Buy Price (Rp) / {showDualUnit ? (item.measured_unit || 'kg') : item.unit}
-                        </label>
-                        <input 
-                          type="number" 
-                          placeholder="e.g. 85000" 
-                          value={buyPriceMap[item.id] || ''} 
-                          onChange={(e) => setBuyPriceMap({...buyPriceMap, [item.id]: e.target.value})} 
-                          className="text-xs p-1 bg-white border border-green-200 rounded font-bold text-black outline-green-500" 
-                        />
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex gap-1 items-center">
+          .map((item: any) => (
+          <div key={item.id} className="bg-white border p-4 rounded-xl flex flex-col gap-3 shadow-sm hover:shadow-md transition-all">
+            <div className="flex justify-between items-start">
+              <div className="w-full">
+                {editingId === item.id ? (
+                  <div className="flex flex-col gap-2 mb-2">
                     <input 
-                      type="number" 
-                      value={qtyMap[item.id] || ''} 
-                      onChange={(e) => setQtyMap({...qtyMap, [item.id]: e.target.value})} 
-                      onKeyDown={(e) => { if (e.key === '-') e.preventDefault(); }} 
-                      className="border w-full p-2 text-center rounded-lg font-bold outline-blue-500 text-black" 
-                      min="1" 
-                      placeholder="Qty (Pcs)" 
+                      className="border p-1 rounded text-sm font-bold w-full text-black outline-blue-500"
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      autoFocus
                     />
-                    <button 
-                      onClick={() => updateStock(item.id, Math.abs(Number(qtyMap[item.id])), destMap[item.id])} 
-                      className="bg-green-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-green-600"
-                    >
-                      IN
-                    </button>
-                    <button 
-                      onClick={() => updateStock(item.id, -Math.abs(Number(qtyMap[item.id])), destMap[item.id])} 
-                      className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-600"
-                    >
-                      OUT
-                    </button>
+                    <input 
+                      className="border p-1 rounded text-xs w-20 text-black outline-blue-500"
+                      value={editUnit}
+                      onChange={(e) => setEditUnit(e.target.value)}
+                    />
+                    <div className="flex gap-2">
+                      <button onClick={() => updateItem(item.id)} className="text-[10px] bg-blue-600 text-white px-2 py-1 rounded font-bold">Save</button>
+                      <button onClick={() => setEditingId(null)} className="text-[10px] bg-gray-400 text-white px-2 py-1 rounded font-bold">Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <div className="font-bold text-gray-800 text-lg leading-tight uppercase">{item.name}</div>
                     
-                    {(profile?.role === 'super-admin' || profile?.role === 'manager') && (
-                      <button 
-                        onClick={() => adjustStock(item.id, qtyMap[item.id])} 
-                        className="bg-amber-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-amber-600"
-                      >
-                        ADJ
-                      </button>
+                    {profile?.role === 'super-admin' && (
+                      <div className="flex gap-1">
+                        <button 
+                          onClick={() => {
+                            setEditingId(item.id);
+                            setEditName(item.name);
+                            setEditUnit(item.unit);
+                          }}
+                          className="text-blue-400 hover:text-blue-600 p-1 transition-colors"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                          </svg>
+                        </button>
+                        <button onClick={() => deleteItem(item.id, item.name)} className="text-red-300 hover:text-red-600 p-1 transition-colors">
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </button>
+                      </div>
                     )}
                   </div>
-                </div>
+                )}
+                
+                {editingId !== item.id && (
+                  <div className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">
+                      {item.divisions?.restaurants?.name} — {item.divisions?.name}
+                  </div>
+                )}
               </div>
-            );
-          })}
+
+              {editingId !== item.id && (
+                <div className="text-2xl font-black text-blue-600 ml-2">
+                  {item.stock} <span className="text-xs font-normal text-gray-400">{item.unit}</span>
+                </div>
+              )}
+            </div>
+            
+            <div className="flex flex-col gap-2 bg-gray-50 p-2 rounded-lg mt-auto">
+              <div className="flex flex-col px-1">
+                <label className="text-[9px] font-black text-gray-400 uppercase tracking-tighter">Destination</label>
+                <select 
+                  value={destMap[item.id] || ''} 
+                  onChange={(e) => setDestMap({...destMap, [item.id]: e.target.value})}
+                  className="text-[10px] p-1 bg-white border rounded border-gray-200 outline-blue-500 font-bold text-gray-700"
+                >
+                  <option value="">-- Select Destination --</option>
+                  {allRestaurants.map((res: any) => (
+                    <option key={res.id} value={res.id}>
+                      {res.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex gap-1 items-center">
+                <input 
+                  type="number" 
+                  value={qtyMap[item.id] || ''} 
+                  onChange={(e) => setQtyMap({...qtyMap, [item.id]: e.target.value})} 
+                  onKeyDown={(e) => { if (e.key === '-') e.preventDefault(); }} 
+                  className="border w-full p-2 text-center rounded-lg font-bold outline-blue-500 text-black" 
+                  min="1" 
+                  placeholder="Qty" 
+                />
+                <button 
+                  onClick={() => updateStock(item.id, Math.abs(Number(qtyMap[item.id])), destMap[item.id])} 
+                  className="bg-green-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-green-600"
+                >
+                  IN
+                </button>
+                <button 
+                  onClick={() => updateStock(item.id, -Math.abs(Number(qtyMap[item.id])), destMap[item.id])} 
+                  className="bg-red-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-red-600"
+                >
+                  OUT
+                </button>
+                
+                {(profile?.role === 'super-admin' || profile?.role === 'manager') && (
+                  <button 
+                    onClick={() => adjustStock(item.id, qtyMap[item.id])} 
+                    className="bg-amber-500 text-white px-3 py-2 rounded-lg text-xs font-bold hover:bg-amber-600"
+                  >
+                    ADJ
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
     
       {/* Activity Feed */}
@@ -1525,10 +1072,7 @@ export default function Home() {
               return (
                 <div key={t.id} className="text-sm p-4 border-b last:border-0 flex justify-between items-center hover:bg-gray-50">
                   <div className="flex flex-col">
-                    <span className="font-bold text-gray-700">
-                      {itemRef?.name || 'Unknown Item'}
-                      {t.measured_qty && <span className="ml-2 text-xs text-purple-600 font-bold">({t.measured_qty} {itemRef?.measured_unit || 'kg'})</span>}
-                    </span>
+                    <span className="font-bold text-gray-700">{itemRef?.name || 'Unknown Item'}</span>
                     <div className="flex flex-wrap items-center gap-2 mt-0.5">
                       {/* EDITABLE DATE/TIME */}
                       {editingDateId === t.id ? (
@@ -1612,111 +1156,55 @@ export default function Home() {
                           📍 TO: {destName || 'Set Destination'}
                         </button>
                       )}
-
-                      {/* EDITABLE PRICE BADGE FOR ADMIN */}
-                      {profile?.role === 'super-admin' && (
-                        editingCostId === t.id ? (
-                          <div className="flex items-center gap-1">
-                            <input 
-                              type="number" 
-                              placeholder="Unit Price (Rp)"
-                              className="w-24 text-[10px] font-black border border-green-300 rounded p-1 outline-green-500 text-center text-black bg-white"
-                              value={editCostValue}
-                              onChange={(e) => setEditCostValue(e.target.value)}
-                            />
-                            <button 
-                              onClick={() => updateTransactionCost(t, editCostValue)}
-                              className="text-[9px] bg-green-600 hover:bg-green-700 text-white px-2 py-1 rounded font-bold transition-colors"
-                            >
-                              Save
-                            </button>
-                            <button 
-                              onClick={() => setEditingCostId(null)} 
-                              className="text-[9px] text-gray-400 font-bold hover:text-red-500 ml-1"
-                            >
-                              ✕
-                            </button>
-                          </div>
-                        ) : (
-                          <button 
-                            onClick={() => {
-                              setEditingCostId(t.id);
-                              setEditCostValue(t.unit_cost ? t.unit_cost.toString() : '');
-                            }}
-                            className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase border transition-all ${
-                              t.total_cost 
-                              ? 'bg-green-50 text-green-700 border-green-200 hover:bg-green-100' 
-                              : 'bg-yellow-50 text-yellow-700 border-yellow-200 hover:bg-yellow-100 italic'
-                            }`}
-                            title="Click to edit purchase unit price"
-                          >
-                            💵 {t.total_cost ? `Rp ${t.total_cost.toLocaleString('id-ID')}` : '+ Add Price'}
-                          </button>
-                        )
-                      )}
                     </div>
                   </div>
                   
-                  {/* EDITABLE QUANTITY BADGE & DELETE BUTTON */}
-                  <div className="flex items-center gap-2">
-                    {editingQtyId === t.id ? (
-                      <div className="flex items-center gap-1">
-                        <input 
-                          type="number" 
-                          className="w-16 text-[10px] font-black border border-blue-300 rounded p-1 outline-blue-500 text-center text-black"
-                          value={editQtyValue}
-                          onChange={(e) => setEditQtyValue(e.target.value)}
-                        />
-                        <button 
-                          onClick={() => updateTransactionQty(t, editQtyValue)}
-                          className="text-[9px] bg-blue-500 hover:bg-blue-600 text-white px-2 py-1 rounded font-bold transition-colors"
-                        >
-                          Save
-                        </button>
-                        <button 
-                          onClick={() => setEditingQtyId(null)} 
-                          className="text-[9px] text-gray-400 font-bold hover:text-red-500 ml-1"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    ) : (
-                      <span 
-                        onClick={() => {
-                          if (profile?.role === 'super-admin') {
-                            setEditingQtyId(t.id);
-                            setEditQtyValue(t.qty.toString());
-                          }
-                        }}
-                        className={`font-black px-3 py-1 rounded-full text-[10px] transition-all border border-transparent ${
-                          profile?.role === 'super-admin' ? 'cursor-pointer hover:border-current hover:opacity-80' : ''
-                        } ${
-                          t.type === 'in' ? 'bg-green-100 text-green-700' : 
-                          t.type === 'adjustment' ? 'bg-amber-100 text-amber-700' : 
-                          'bg-red-100 text-red-700'
-                        }`}
-                        title={profile?.role === 'super-admin' ? "Click to edit quantity" : ""}
-                      >
-                        {t.type.toUpperCase()} {' '}
-                        {t.type === 'adjustment' 
-                          ? (t.qty - t.prev_qty > 0 ? `+${t.qty - t.prev_qty}` : t.qty - t.prev_qty)
-                          : (t.qty > 0 ? `+${t.qty}` : t.qty)
-                        }
-                      </span>
-                    )}
-
-                    {profile?.role === 'super-admin' && (
+                  {/* EDITABLE QUANTITY BADGE */}
+                  {editingQtyId === t.id ? (
+                    <div className="flex items-center gap-1">
+                      <input 
+                        type="number" 
+                        className="w-16 text-[10px] font-black border border-blue-300 rounded p-1 outline-blue-500 text-center text-black"
+                        value={editQtyValue}
+                        onChange={(e) => setEditQtyValue(e.target.value)}
+                      />
                       <button 
-                        onClick={() => deleteTransaction(t)}
-                        className="text-gray-300 hover:text-red-500 p-1 transition-colors"
-                        title="Delete transaction and revert stock"
+                        onClick={() => updateTransactionQty(t, editQtyValue)}
+                        className="text-[9px] bg-blue-500 hover:bg-blue-600 text-white px-2 py-1 rounded font-bold transition-colors"
                       >
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
+                        Save
                       </button>
-                    )}
-                  </div>
+                      <button 
+                        onClick={() => setEditingQtyId(null)} 
+                        className="text-[9px] text-gray-400 font-bold hover:text-red-500 ml-1"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <span 
+                      onClick={() => {
+                        if (profile?.role === 'super-admin') {
+                          setEditingQtyId(t.id);
+                          setEditQtyValue(t.qty.toString());
+                        }
+                      }}
+                      className={`font-black px-3 py-1 rounded-full text-[10px] transition-all border border-transparent ${
+                        profile?.role === 'super-admin' ? 'cursor-pointer hover:border-current hover:opacity-80' : ''
+                      } ${
+                        t.type === 'in' ? 'bg-green-100 text-green-700' : 
+                        t.type === 'adjustment' ? 'bg-amber-100 text-amber-700' : 
+                        'bg-red-100 text-red-700'
+                      }`}
+                      title={profile?.role === 'super-admin' ? "Click to edit quantity" : ""}
+                    >
+                      {t.type.toUpperCase()} {' '}
+                      {t.type === 'adjustment' 
+                        ? (t.qty - t.prev_qty > 0 ? `+${t.qty - t.prev_qty}` : t.qty - t.prev_qty)
+                        : (t.qty > 0 ? `+${t.qty}` : t.qty)
+                      }
+                    </span>
+                  )}
                 </div>
               );
             })}

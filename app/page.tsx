@@ -300,19 +300,146 @@ export default function Home() {
       return; 
     }
 
-    const { error } = await supabase.rpc('update_stock', { 
-      item_id: itemId, 
-      qty: numQty,
-      dest_id: destId || null 
-    });
+    const item = items.find(i => i.id === itemId);
+    const currentStock = item?.stock || 0;
 
-    if (!error) {
-      setQtyMap(prev => ({ ...prev, [itemId]: '' }));
-      fetchItems();
-      fetchTransactions();
+    // --- OUT Movement (FIFO execution) ---
+    if (numQty < 0) {
+      const absQty = Math.abs(numQty);
+
+      // Check for prior price fallback silently
+      const { data: latestInTx } = await supabase
+        .from('transactions')
+        .select('unit_cost')
+        .eq('item_id', itemId)
+        .eq('type', 'in')
+        .gt('unit_cost', 0)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const { data: latestBatch } = await supabase
+        .from('inventory_batches')
+        .select('unit_cost')
+        .eq('item_id', itemId)
+        .gt('unit_cost', 0)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const fallbackUnitCost = latestBatch?.unit_cost || latestInTx?.unit_cost || null;
+      const fallbackTotalCost = fallbackUnitCost ? fallbackUnitCost * absQty : null;
+
+      const { data: fifoCost, error: fifoErr } = await supabase.rpc('process_fifo_out', {
+        p_item_id: itemId,
+        p_qty: absQty,
+        p_measured_qty: null,
+        p_dest_id: destId || null,
+        p_author_id: user.id
+      });
+
+      if (fifoErr) {
+        console.warn("FIFO RPC fallback:", fifoErr.message);
+        const { data: tx, error: txErr } = await supabase
+          .from('transactions')
+          .insert({
+            item_id: itemId,
+            qty: -absQty,
+            unit_cost: fallbackUnitCost,
+            total_cost: fallbackTotalCost,
+            type: 'out',
+            destination_id: destId || null,
+            profile_id: user.id
+          })
+          .select()
+          .single();
+
+        if (txErr) return alert("Action failed: " + txErr.message);
+
+        await supabase
+          .from('items')
+          .update({ stock: currentStock - absQty })
+          .eq('id', itemId);
+      } else {
+        if (fallbackUnitCost) {
+          const { data: latestOutTx } = await supabase
+            .from('transactions')
+            .select('id, unit_cost, total_cost')
+            .eq('item_id', itemId)
+            .eq('type', 'out')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (latestOutTx && (!latestOutTx.unit_cost || latestOutTx.unit_cost === 0)) {
+            await supabase
+              .from('transactions')
+              .update({
+                unit_cost: fallbackUnitCost,
+                total_cost: fallbackTotalCost
+              })
+              .eq('id', latestOutTx.id);
+          }
+        }
+      }
     } else {
-      alert("Action failed: " + error.message);
+      // --- IN Movement ---
+      // Silent Price Inheritance: check for existing price without raising UI errors
+      let inheritedUnitCost: number | null = null;
+      try {
+        const { data: previousInTx } = await supabase
+          .from('transactions')
+          .select('unit_cost')
+          .eq('item_id', itemId)
+          .eq('type', 'in')
+          .gt('unit_cost', 0)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (previousInTx?.unit_cost) {
+          inheritedUnitCost = Number(previousInTx.unit_cost);
+        }
+      } catch (err) {
+        console.warn("Silent price check:", err);
+      }
+
+      const calcTotalCost = inheritedUnitCost ? inheritedUnitCost * numQty : null;
+      
+      const { data: tx, error: txErr } = await supabase
+        .from('transactions')
+        .insert({
+          item_id: itemId,
+          qty: numQty,
+          unit_cost: inheritedUnitCost,
+          total_cost: calcTotalCost,
+          type: 'in',
+          destination_id: destId || null,
+          profile_id: user.id
+        })
+        .select()
+        .single();
+
+      if (txErr) return alert("Action failed: " + txErr.message);
+
+      await supabase.from('inventory_batches').insert({
+        item_id: itemId,
+        transaction_id: tx.id,
+        unit_cost: inheritedUnitCost || 0,
+        remaining_qty: numQty
+      });
+
+      const { error: stockErr } = await supabase
+        .from('items')
+        .update({ stock: currentStock + numQty })
+        .eq('id', itemId);
+
+      if (stockErr) return alert("Stock update failed: " + stockErr.message);
     }
+
+    setQtyMap(prev => ({ ...prev, [itemId]: '' }));
+    fetchItems();
+    fetchTransactions();
   }
 
   async function adjustStock(itemId: string, qty: any) {
