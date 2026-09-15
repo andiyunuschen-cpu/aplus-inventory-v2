@@ -17,6 +17,9 @@ export const metadata: Metadata = {
   title: "Aplus Inventory Control",
   description: "Inventory Management System",
   manifest: "/manifest.webmanifest",
+  icons: {
+    icon: "/icon.png",
+  },
 };
 
 export default function RootLayout({
