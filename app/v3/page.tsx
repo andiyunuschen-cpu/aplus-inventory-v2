@@ -623,75 +623,108 @@ export default function Home() {
     }
   }
 
-  async function updateItem(itemId: string) {
-    if (!editName.trim() || !editUnit.trim()) return alert("Fields cannot be empty");
+ async function updateItem(itemId: string) {
+  if (!editName.trim() || !editUnit.trim()) return alert("Fields cannot be empty");
 
-    const updatePayload: any = { 
-      name: editName, 
-      unit: editUnit 
-    };
+  const updatePayload: any = { 
+    name: editName, 
+    unit: editUnit 
+  };
 
-    if (profile?.role === 'super-admin') {
-      updatePayload.is_measured = editIsMeasured;
-      updatePayload.measured_unit = editIsMeasured ? editMeasuredUnit : null;
-    }
+  if (profile?.role === 'super-admin') {
+    updatePayload.is_measured = editIsMeasured;
+    updatePayload.measured_unit = editIsMeasured ? editMeasuredUnit : null;
+  }
 
-    const { error } = await supabase
-      .from('items')
-      .update(updatePayload)
-      .eq('id', itemId);
+  const { error } = await supabase
+    .from('items')
+    .update(updatePayload)
+    .eq('id', itemId);
 
-    if (error) return alert("Update failed: " + error.message);
+  if (error) return alert("Update failed: " + error.message);
 
-    // Super Admin: Direct Baseline Price Input update logic
-    const newPriceNum = editPrice ? Number(editPrice) : null;
-    if (profile?.role === 'super-admin' && newPriceNum !== null && !isNaN(newPriceNum) && newPriceNum >= 0) {
-      const { data: latestInTx } = await supabase
+  // --- Price Update Logic ---
+  const newPriceNum = editPrice !== '' && editPrice !== null ? Number(editPrice) : null;
+
+  if (profile?.role === 'super-admin' && newPriceNum !== null && !isNaN(newPriceNum) && newPriceNum >= 0) {
+    // 1. Fetch the latest transaction of ANY type (in, out, or adjustment)
+    const { data: latestTx } = await supabase
+      .from('transactions')
+      .select('id, type, qty, measured_qty')
+      .eq('item_id', itemId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (latestTx) {
+      const qtyMult = editIsMeasured ? (Number(latestTx.measured_qty) || 0) : Math.abs(Number(latestTx.qty));
+      const calcTotal = qtyMult > 0 ? newPriceNum * qtyMult : null;
+
+      // Update unit_cost on the latest transaction
+      await supabase
         .from('transactions')
-        .select('id')
+        .update({ 
+          unit_cost: newPriceNum,
+          total_cost: calcTotal 
+        })
+        .eq('id', latestTx.id);
+
+      // Update inventory batch if attached to this transaction
+      await supabase
+        .from('inventory_batches')
+        .update({ unit_cost: newPriceNum })
+        .eq('transaction_id', latestTx.id);
+
+      // Update all existing 'out' transactions so COGS reports reflect this price
+      const { data: outs } = await supabase
+        .from('transactions')
+        .select('id, qty, measured_qty')
         .eq('item_id', itemId)
-        .eq('type', 'in')
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .eq('type', 'out');
 
-      if (latestInTx) {
-        await supabase
-          .from('transactions')
-          .update({ unit_cost: newPriceNum })
-          .eq('id', latestInTx.id);
-
-        await supabase
-          .from('inventory_batches')
-          .update({ unit_cost: newPriceNum })
-          .eq('transaction_id', latestInTx.id);
-      } else {
-        const { data: outs } = await supabase
-          .from('transactions')
-          .select('id, qty, measured_qty')
-          .eq('item_id', itemId)
-          .eq('type', 'out');
-
-        if (outs && outs.length > 0) {
-          for (const outTx of outs) {
-            const qtyMult = editIsMeasured ? (Number(outTx.measured_qty) || 0) : Math.abs(Number(outTx.qty));
-            await supabase
-              .from('transactions')
-              .update({
-                unit_cost: newPriceNum,
-                total_cost: newPriceNum * qtyMult
-              })
-              .eq('id', outTx.id);
-          }
+      if (outs && outs.length > 0) {
+        for (const outTx of outs) {
+          const outMult = editIsMeasured ? (Number(outTx.measured_qty) || 0) : Math.abs(Number(outTx.qty));
+          await supabase
+            .from('transactions')
+            .update({
+              unit_cost: newPriceNum,
+              total_cost: newPriceNum * outMult
+            })
+            .eq('id', outTx.id);
         }
       }
-    }
+    } else {
+      // 2. If NO transactions exist at all, create a baseline record to store the price
+      const { data: newTx } = await supabase
+        .from('transactions')
+        .insert({
+          item_id: itemId,
+          qty: 0,
+          unit_cost: newPriceNum,
+          total_cost: 0,
+          type: 'in',
+          profile_id: user.id
+        })
+        .select()
+        .single();
 
-    setEditingId(null);
-    setEditPrice('');
-    fetchItems();
-    fetchTransactions();
+      if (newTx) {
+        await supabase.from('inventory_batches').insert({
+          item_id: itemId,
+          transaction_id: newTx.id,
+          unit_cost: newPriceNum,
+          remaining_qty: 0
+        });
+      }
+    }
   }
+
+  setEditingId(null);
+  setEditPrice('');
+  fetchItems();
+  fetchTransactions();
+}
 
   async function updateTransactionCost(transaction: any, newCostStr: string) {
     if (profile?.role !== 'super-admin') {
